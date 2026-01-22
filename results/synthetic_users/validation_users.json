@@ -1,0 +1,516 @@
+{
+  "user_26": {
+    "user_id": "user_26",
+    "archetype": "Music Enthusiast",
+    "archetype_key": "music_enthusiast",
+    "engagement_level": 0.7744316054727097,
+    "diversity_preference": 0.7962150440284453,
+    "novelty_seeking": 0.7282124069308852,
+    "popularity_bias": 0.22861688439959138,
+    "preferred_genres": [
+      "Rock",
+      "Electronic",
+      "Jazz",
+      "Classical"
+    ],
+    "interaction_rate": 0.8,
+    "age_group": "18-25",
+    "listening_frequency": "weekly",
+    "description": "Highly engaged users who explore diverse music genres"
+  },
+  "user_46": {
+    "user_id": "user_46",
+    "archetype": "Genre Specialist",
+    "archetype_key": "genre_specialist",
+    "engagement_level": 0.7423151029733398,
+    "diversity_preference": 0.1992215119663574,
+    "novelty_seeking": 0.3591614767447386,
+    "popularity_bias": 0.5153678005087312,
+    "preferred_genres": [
+      "Rock"
+    ],
+    "interaction_rate": 0.6,
+    "age_group": "46-55",
+    "listening_frequency": "monthly",
+    "description": "Users focused on specific genres with moderate engagement"
+  },
+  "user_20": {
+    "user_id": "user_20",
+    "archetype": "Casual Listener",
+    "archetype_key": "casual_listener",
+    "engagement_level": 0.4238937641019541,
+    "diversity_preference": 0.3416147244172924,
+    "novelty_seeking": 0.029635227926416957,
+    "popularity_bias": 0.7260828712694944,
+    "preferred_genres": [
+      "Pop",
+      "Rock"
+    ],
+    "interaction_rate": 0.3,
+    "age_group": "46-55",
+    "listening_frequency": "daily",
+    "description": "Low engagement users who prefer popular music"
+  },
+  "user_156": {
+    "user_id": "user_156",
+    "archetype": "Genre Specialist",
+    "archetype_key": "genre_specialist",
+    "engagement_level": 0.9073761106244262,
+    "diversity_preference": 0.2254391118956767,
+    "novelty_seeking": 0.33561007067442455,
+    "popularity_bias": 0.537092947044542,
+    "preferred_genres": [
+      "Rock"
+    ],
+    "interaction_rate": 0.6,
+    "age_group": "46-55",
+    "listening_frequency": "daily",
+    "description": "Users focused on specific genres with moderate engagement"
+  },
+  "user_23": {
+    "user_id": "user_23",
+    "archetype": "Music Enthusiast",
+    "archetype_key": "music_enthusiast",
+    "engagement_level": 0.9654911291221063,
+    "diversity_preference": 0.6716522449087311,
+    "novelty_seeking": 0.7621675780270423,
+    "popularity_bias": 0.2975812256608487,
+    "preferred_genres": [
+      "Rock",
+      "Electronic",
+      "Jazz",
+      "Classical"
+    ],
+    "interaction_rate": 0.8,
+    "age_group": "55+",
+    "listening_frequency": "weekly",
+    "description": "Highly engaged users who explore diverse music genres"
+  },
+  "user_83": {
+    "user_id": "user_83",
+    "archetype": "Genre Specialist",
+    "archetype_key": "genre_specialist",
+    "engagement_level": 0.7554151429301682,
+    "diversity_preference": 0.23154095292910234,
+    "novelty_seeking": 0.4340352101994645,
+    "popularity_bias": 0.4196586749258554,
+    "preferred_genres": [
+      "Rock"
+    ],
+    "interaction_rate": 0.6,
+    "age_group": "18-25",
+    "listening_frequency": "daily",
+    "description": "Users focused on specific genres with moderate engagement"
+  },
+  "user_47": {
+    "user_id": "user_47",
+    "archetype": "Music Enthusiast",
+    "archetype_key": "music_enthusiast",
+    "engagement_level": 0.8924384043138935,
+    "diversity_preference": 0.6555183781724359,
+    "novelty_seeking": 0.710428007961508,
+    "popularity_bias": 0.2620655224520233,
+    "preferred_genres": [
+      "Rock",
+      "Electronic",
+      "Jazz",
+      "Classical"
+    ],
+    "interaction_rate": 0.8,
+    "age_group": "18-25",
+    "listening_frequency": "daily",
+    "description": "Highly engaged users who explore diverse music genres"
+  },
+  "user_129": {
+    "user_id": "user_129",
+    "archetype": "Music Enthusiast",
+    "archetype_key": "music_enthusiast",
+    "engagement_level": 0.8698807605471691,
+    "diversity_preference": 0.8448395473030189,
+    "novelty_seeking": 0.6689183916945491,
+    "popularity_bias": 0.4480314121929161,
+    "preferred_genres": [
+      "Rock",
+      "Electronic",
+      "Jazz",
+      "Classical"
+    ],
+    "interaction_rate": 0.8,
+    "age_group": "26-35",
+    "listening_frequency": "weekly",
+    "description": "Highly engaged users who explore diverse music genres"
+  },
+  "user_9": {
+    "user_id": "user_9",
+    "archetype": "Casual Listener",
+    "archetype_key": "casual_listener",
+    "engagement_level": 0.47065779149930703,
+    "diversity_preference": 0.3550326954976895,
+    "novelty_seeking": 0.08461144689188943,
+    "popularity_bias": 0.8350249187362505,
+    "preferred_genres": [
+      "Pop",
+      "Rock"
+    ],
+    "interaction_rate": 0.3,
+    "age_group": "26-35",
+    "listening_frequency": "monthly",
+    "description": "Low engagement users who prefer popular music"
+  },
+  "user_84": {
+    "user_id": "user_84",
+    "archetype": "Casual Listener",
+    "archetype_key": "casual_listener",
+    "engagement_level": 0.43285842550735715,
+    "diversity_preference": 0.2668886433121499,
+    "novelty_seeking": 0.0,
+    "popularity_bias": 0.9507542308680215,
+    "preferred_genres": [
+      "Pop",
+      "Rock"
+    ],
+    "interaction_rate": 0.3,
+    "age_group": "55+",
+    "listening_frequency": "monthly",
+    "description": "Low engagement users who prefer popular music"
+  },
+  "user_187": {
+    "user_id": "user_187",
+    "archetype": "Music Enthusiast",
+    "archetype_key": "music_enthusiast",
+    "engagement_level": 0.9219274485230297,
+    "diversity_preference": 0.8529859372154129,
+    "novelty_seeking": 0.4863773659546283,
+    "popularity_bias": 0.3600976734060407,
+    "preferred_genres": [
+      "Rock",
+      "Electronic",
+      "Jazz",
+      "Classical"
+    ],
+    "interaction_rate": 0.8,
+    "age_group": "46-55",
+    "listening_frequency": "monthly",
+    "description": "Highly engaged users who explore diverse music genres"
+  },
+  "user_130": {
+    "user_id": "user_130",
+    "archetype": "Explorer",
+    "archetype_key": "explorer",
+    "engagement_level": 0.8205114758309717,
+    "diversity_preference": 0.8681164663823469,
+    "novelty_seeking": 0.8937171332627987,
+    "popularity_bias": 0.23778898214551714,
+    "preferred_genres": [
+      "Folk"
+    ],
+    "interaction_rate": 0.7,
+    "age_group": "18-25",
+    "listening_frequency": "daily",
+    "description": "High novelty seeking users who discover new music"
+  },
+  "user_48": {
+    "user_id": "user_48",
+    "archetype": "Explorer",
+    "archetype_key": "explorer",
+    "engagement_level": 0.9983769046727742,
+    "diversity_preference": 0.8716609405933626,
+    "novelty_seeking": 0.9368023667716537,
+    "popularity_bias": 0.22174360916247238,
+    "preferred_genres": [
+      "International",
+      "Soul-RnB",
+      "Easy Listening"
+    ],
+    "interaction_rate": 0.7,
+    "age_group": "26-35",
+    "listening_frequency": "weekly",
+    "description": "High novelty seeking users who discover new music"
+  },
+  "user_138": {
+    "user_id": "user_138",
+    "archetype": "Casual Listener",
+    "archetype_key": "casual_listener",
+    "engagement_level": 0.5240800636161026,
+    "diversity_preference": 0.3427040955437016,
+    "novelty_seeking": 0.13564604317297185,
+    "popularity_bias": 0.8955681604114674,
+    "preferred_genres": [
+      "Pop",
+      "Rock"
+    ],
+    "interaction_rate": 0.3,
+    "age_group": "46-55",
+    "listening_frequency": "daily",
+    "description": "Low engagement users who prefer popular music"
+  },
+  "user_191": {
+    "user_id": "user_191",
+    "archetype": "Genre Specialist",
+    "archetype_key": "genre_specialist",
+    "engagement_level": 0.6466005762551931,
+    "diversity_preference": 0.23868565879294965,
+    "novelty_seeking": 0.4695428242148188,
+    "popularity_bias": 0.30698161581299255,
+    "preferred_genres": [
+      "Rock"
+    ],
+    "interaction_rate": 0.6,
+    "age_group": "46-55",
+    "listening_frequency": "daily",
+    "description": "Users focused on specific genres with moderate engagement"
+  },
+  "user_108": {
+    "user_id": "user_108",
+    "archetype": "Mainstream Fan",
+    "archetype_key": "mainstream_fan",
+    "engagement_level": 0.652877584798035,
+    "diversity_preference": 0.28399265291915865,
+    "novelty_seeking": 0.24055984353061247,
+    "popularity_bias": 0.7052936234788914,
+    "preferred_genres": [
+      "Pop",
+      "Hip-Hop"
+    ],
+    "interaction_rate": 0.5,
+    "age_group": "26-35",
+    "listening_frequency": "monthly",
+    "description": "Users who prefer mainstream and popular music"
+  },
+  "user_139": {
+    "user_id": "user_139",
+    "archetype": "Genre Specialist",
+    "archetype_key": "genre_specialist",
+    "engagement_level": 0.8760551056772605,
+    "diversity_preference": 0.3340846819779009,
+    "novelty_seeking": 0.5292464534444595,
+    "popularity_bias": 0.553982548788716,
+    "preferred_genres": [
+      "Rock"
+    ],
+    "interaction_rate": 0.6,
+    "age_group": "26-35",
+    "listening_frequency": "monthly",
+    "description": "Users focused on specific genres with moderate engagement"
+  },
+  "user_158": {
+    "user_id": "user_158",
+    "archetype": "Casual Listener",
+    "archetype_key": "casual_listener",
+    "engagement_level": 0.316932145449916,
+    "diversity_preference": 0.09635262256500526,
+    "novelty_seeking": 0.2880296157089167,
+    "popularity_bias": 0.6003037451355296,
+    "preferred_genres": [
+      "Pop",
+      "Rock"
+    ],
+    "interaction_rate": 0.3,
+    "age_group": "26-35",
+    "listening_frequency": "weekly",
+    "description": "Low engagement users who prefer popular music"
+  },
+  "user_4": {
+    "user_id": "user_4",
+    "archetype": "Genre Specialist",
+    "archetype_key": "genre_specialist",
+    "engagement_level": 0.8212577080631893,
+    "diversity_preference": 0.11675770737808328,
+    "novelty_seeking": 0.3105816464586871,
+    "popularity_bias": 0.5802272462910196,
+    "preferred_genres": [
+      "Rock"
+    ],
+    "interaction_rate": 0.6,
+    "age_group": "46-55",
+    "listening_frequency": "weekly",
+    "description": "Users focused on specific genres with moderate engagement"
+  },
+  "user_66": {
+    "user_id": "user_66",
+    "archetype": "Explorer",
+    "archetype_key": "explorer",
+    "engagement_level": 0.8909800600808391,
+    "diversity_preference": 0.8171556295701758,
+    "novelty_seeking": 0.86020211194535,
+    "popularity_bias": 0.34795147914913377,
+    "preferred_genres": [
+      "Blues"
+    ],
+    "interaction_rate": 0.7,
+    "age_group": "55+",
+    "listening_frequency": "daily",
+    "description": "High novelty seeking users who discover new music"
+  },
+  "user_146": {
+    "user_id": "user_146",
+    "archetype": "Music Enthusiast",
+    "archetype_key": "music_enthusiast",
+    "engagement_level": 0.7872107584798607,
+    "diversity_preference": 0.8720233897159936,
+    "novelty_seeking": 0.593786006554872,
+    "popularity_bias": 0.3596610000581194,
+    "preferred_genres": [
+      "Rock",
+      "Electronic",
+      "Jazz",
+      "Classical"
+    ],
+    "interaction_rate": 0.8,
+    "age_group": "18-25",
+    "listening_frequency": "monthly",
+    "description": "Highly engaged users who explore diverse music genres"
+  },
+  "user_2": {
+    "user_id": "user_2",
+    "archetype": "Explorer",
+    "archetype_key": "explorer",
+    "engagement_level": 0.8645825122867133,
+    "diversity_preference": 0.9469545861084976,
+    "novelty_seeking": 0.8904889913144723,
+    "popularity_bias": 0.03807765949606595,
+    "preferred_genres": [
+      "Rock",
+      "Electronic"
+    ],
+    "interaction_rate": 0.7,
+    "age_group": "26-35",
+    "listening_frequency": "monthly",
+    "description": "High novelty seeking users who discover new music"
+  },
+  "user_113": {
+    "user_id": "user_113",
+    "archetype": "Genre Specialist",
+    "archetype_key": "genre_specialist",
+    "engagement_level": 0.7201769183708314,
+    "diversity_preference": 0.14102047097766132,
+    "novelty_seeking": 0.4085963845432875,
+    "popularity_bias": 0.5619511153129513,
+    "preferred_genres": [
+      "Rock"
+    ],
+    "interaction_rate": 0.6,
+    "age_group": "18-25",
+    "listening_frequency": "weekly",
+    "description": "Users focused on specific genres with moderate engagement"
+  },
+  "user_142": {
+    "user_id": "user_142",
+    "archetype": "Casual Listener",
+    "archetype_key": "casual_listener",
+    "engagement_level": 0.48171081901651097,
+    "diversity_preference": 0.12102477256109301,
+    "novelty_seeking": 0.1926736818100766,
+    "popularity_bias": 0.7300197157078036,
+    "preferred_genres": [
+      "Pop",
+      "Rock"
+    ],
+    "interaction_rate": 0.3,
+    "age_group": "36-45",
+    "listening_frequency": "weekly",
+    "description": "Low engagement users who prefer popular music"
+  },
+  "user_194": {
+    "user_id": "user_194",
+    "archetype": "Mainstream Fan",
+    "archetype_key": "mainstream_fan",
+    "engagement_level": 0.6181155553275843,
+    "diversity_preference": 0.1890782017691037,
+    "novelty_seeking": 0.11832941571272171,
+    "popularity_bias": 0.9740119354690333,
+    "preferred_genres": [
+      "Pop",
+      "Hip-Hop"
+    ],
+    "interaction_rate": 0.5,
+    "age_group": "18-25",
+    "listening_frequency": "weekly",
+    "description": "Users who prefer mainstream and popular music"
+  },
+  "user_109": {
+    "user_id": "user_109",
+    "archetype": "Casual Listener",
+    "archetype_key": "casual_listener",
+    "engagement_level": 0.39219247017438913,
+    "diversity_preference": 0.3724000208151462,
+    "novelty_seeking": 0.07753955850811639,
+    "popularity_bias": 0.9286296530151439,
+    "preferred_genres": [
+      "Pop",
+      "Rock"
+    ],
+    "interaction_rate": 0.3,
+    "age_group": "18-25",
+    "listening_frequency": "monthly",
+    "description": "Low engagement users who prefer popular music"
+  },
+  "user_102": {
+    "user_id": "user_102",
+    "archetype": "Casual Listener",
+    "archetype_key": "casual_listener",
+    "engagement_level": 0.4937129455868884,
+    "diversity_preference": 0.2949541947602988,
+    "novelty_seeking": 0.3951299333042913,
+    "popularity_bias": 0.6603657657049536,
+    "preferred_genres": [
+      "Pop",
+      "Rock"
+    ],
+    "interaction_rate": 0.3,
+    "age_group": "26-35",
+    "listening_frequency": "monthly",
+    "description": "Low engagement users who prefer popular music"
+  },
+  "user_166": {
+    "user_id": "user_166",
+    "archetype": "Explorer",
+    "archetype_key": "explorer",
+    "engagement_level": 0.6287033024465086,
+    "diversity_preference": 1.0,
+    "novelty_seeking": 0.7823665179377646,
+    "popularity_bias": 0.08370217901474764,
+    "preferred_genres": [
+      "Soul-RnB",
+      "Classical"
+    ],
+    "interaction_rate": 0.7,
+    "age_group": "18-25",
+    "listening_frequency": "daily",
+    "description": "High novelty seeking users who discover new music"
+  },
+  "user_176": {
+    "user_id": "user_176",
+    "archetype": "Explorer",
+    "archetype_key": "explorer",
+    "engagement_level": 0.8737319347052136,
+    "diversity_preference": 0.8013130990976887,
+    "novelty_seeking": 1.0,
+    "popularity_bias": 0.29161717336173326,
+    "preferred_genres": [
+      "Folk",
+      "Blues"
+    ],
+    "interaction_rate": 0.7,
+    "age_group": "18-25",
+    "listening_frequency": "daily",
+    "description": "High novelty seeking users who discover new music"
+  },
+  "user_167": {
+    "user_id": "user_167",
+    "archetype": "Mainstream Fan",
+    "archetype_key": "mainstream_fan",
+    "engagement_level": 0.6327665752354227,
+    "diversity_preference": 0.13932692436057734,
+    "novelty_seeking": 0.0,
+    "popularity_bias": 0.8923490740930822,
+    "preferred_genres": [
+      "Pop",
+      "Hip-Hop"
+    ],
+    "interaction_rate": 0.5,
+    "age_group": "36-45",
+    "listening_frequency": "weekly",
+    "description": "Users who prefer mainstream and popular music"
+  }
+}

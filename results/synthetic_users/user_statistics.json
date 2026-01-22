@@ -1,0 +1,44 @@
+{
+  "n_users": 200,
+  "total_interactions": 80559,
+  "archetype_distribution": {
+    "Casual Listener": 0.32,
+    "Genre Specialist": 0.27,
+    "Music Enthusiast": 0.19,
+    "Mainstream Fan": 0.09,
+    "Explorer": 0.13
+  },
+  "interaction_stats": {
+    "mean": 402.795,
+    "std": 268.8110172128367,
+    "min": 37,
+    "max": 1313,
+    "median": 369.5
+  },
+  "rating_distribution": {
+    "2": 44784,
+    "3": 20892,
+    "1": 14823,
+    "4": 60
+  },
+  "genre_distribution": {
+    "Rock": 40135,
+    "Pop": 3077,
+    "Old-Time / Historic": 1335,
+    "Experimental": 2160,
+    "Instrumental": 1117,
+    "Electronic": 14389,
+    "Spoken": 931,
+    "Jazz": 3188,
+    "Folk": 1756,
+    "Hip-Hop": 4923,
+    "International": 207,
+    "Country": 1048,
+    "Classical": 3667,
+    "Blues": 920,
+    "Soul-RnB": 1530,
+    "Easy Listening": 176
+  },
+  "sparsity": 0.8993012499999999,
+  "density": 0.10069875000000006
+}

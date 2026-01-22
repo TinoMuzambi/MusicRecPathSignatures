@@ -1,0 +1,49 @@
+{
+  "script_name": "compute_similarity",
+  "start_time": "2025-12-31T15:46:32.659973",
+  "end_time": "2025-12-31T16:18:11.771350",
+  "total_duration_seconds": 1899.1113774776459,
+  "total_duration_formatted": "31m 39.11s",
+  "start_memory_mb": 148.41796875,
+  "end_memory_mb": 15672.3203125,
+  "memory_delta_mb": 15523.90234375,
+  "peak_memory_mb": 92678.703125,
+  "sections": [
+    {
+      "section": "Data Loading",
+      "duration_seconds": 1441.2572605609894,
+      "duration_formatted": "24m 1.26s",
+      "memory_mb": 92678.703125,
+      "memory_delta_mb": 92530.28515625
+    },
+    {
+      "section": "Path Signature Computation",
+      "duration_seconds": 102.5365538597107,
+      "duration_formatted": "1m 42.54s",
+      "memory_mb": 15672.9453125,
+      "memory_delta_mb": -77005.7578125
+    },
+    {
+      "section": "Model Initialization",
+      "duration_seconds": 0.0003542900085449219,
+      "duration_formatted": "0.00s",
+      "memory_mb": 15672.9453125,
+      "memory_delta_mb": 0.0
+    },
+    {
+      "section": "Similarity Matrix Computation",
+      "duration_seconds": 355.3064019680023,
+      "duration_formatted": "5m 55.31s",
+      "memory_mb": 15672.3203125,
+      "memory_delta_mb": -0.625
+    },
+    {
+      "section": "Results Saving",
+      "duration_seconds": 0.008133649826049805,
+      "duration_formatted": "0.01s",
+      "memory_mb": 15672.3203125,
+      "memory_delta_mb": 0.0
+    }
+  ],
+  "section_count": 5
+}

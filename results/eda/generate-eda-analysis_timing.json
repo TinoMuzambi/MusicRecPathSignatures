@@ -1,0 +1,56 @@
+{
+  "script_name": "generate_eda_analysis",
+  "start_time": "2025-12-31T15:19:56.651583",
+  "end_time": "2025-12-31T15:45:54.446388",
+  "total_duration_seconds": 1557.794804573059,
+  "total_duration_formatted": "25m 57.79s",
+  "start_memory_mb": 137.1171875,
+  "end_memory_mb": 92754.484375,
+  "memory_delta_mb": 92617.3671875,
+  "peak_memory_mb": 92754.484375,
+  "sections": [
+    {
+      "section": "Data Loading",
+      "duration_seconds": 1447.0159542560577,
+      "duration_formatted": "24m 7.02s",
+      "memory_mb": 92665.44921875,
+      "memory_delta_mb": 92528.33203125
+    },
+    {
+      "section": "Data Validation",
+      "duration_seconds": 0.00912022590637207,
+      "duration_formatted": "0.01s",
+      "memory_mb": 92665.82421875,
+      "memory_delta_mb": 0.375
+    },
+    {
+      "section": "Dataset Statistics Generation",
+      "duration_seconds": 0.04356718063354492,
+      "duration_formatted": "0.04s",
+      "memory_mb": 92667.69921875,
+      "memory_delta_mb": 1.875
+    },
+    {
+      "section": "Genre Analysis Generation",
+      "duration_seconds": 0.025362014770507812,
+      "duration_formatted": "0.03s",
+      "memory_mb": 92667.82421875,
+      "memory_delta_mb": 0.125
+    },
+    {
+      "section": "Visualisation Generation",
+      "duration_seconds": 110.69611144065857,
+      "duration_formatted": "1m 50.70s",
+      "memory_mb": 92754.484375,
+      "memory_delta_mb": 86.66015625
+    },
+    {
+      "section": "Summary Report Generation",
+      "duration_seconds": 0.0010769367218017578,
+      "duration_formatted": "0.00s",
+      "memory_mb": 92754.484375,
+      "memory_delta_mb": 0.0
+    }
+  ],
+  "section_count": 6
+}

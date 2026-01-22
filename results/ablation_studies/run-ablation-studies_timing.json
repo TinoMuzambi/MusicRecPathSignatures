@@ -1,0 +1,63 @@
+{
+  "script_name": "run_ablation_studies",
+  "start_time": "2026-01-12T18:18:04.834466",
+  "end_time": "2026-01-12T19:41:23.757434",
+  "total_duration_seconds": 4998.922967672348,
+  "total_duration_formatted": "1h 23m 18.92s",
+  "start_memory_mb": 171.50390625,
+  "end_memory_mb": 157788.0859375,
+  "memory_delta_mb": 157616.58203125,
+  "peak_memory_mb": 157788.0859375,
+  "sections": [
+    {
+      "section": "Data Loading",
+      "duration_seconds": 0.023704051971435547,
+      "duration_formatted": "0.02s",
+      "memory_mb": 175.50390625,
+      "memory_delta_mb": 4.0
+    },
+    {
+      "section": "Path Signature Order Analysis",
+      "duration_seconds": 110.3175995349884,
+      "duration_formatted": "1m 50.32s",
+      "memory_mb": 93360.31640625,
+      "memory_delta_mb": 659.6875
+    },
+    {
+      "section": "Temperature Scaling Analysis",
+      "duration_seconds": 11.896631240844727,
+      "duration_formatted": "11.90s",
+      "memory_mb": 93661.31640625,
+      "memory_delta_mb": 301.0
+    },
+    {
+      "section": "Feature Combination Analysis",
+      "duration_seconds": 93.70158362388611,
+      "duration_formatted": "1m 33.70s",
+      "memory_mb": 97039.31640625,
+      "memory_delta_mb": 3378.0
+    },
+    {
+      "section": "Similarity Metric Analysis",
+      "duration_seconds": 806.6835453510284,
+      "duration_formatted": "13m 26.68s",
+      "memory_mb": 109267.95703125,
+      "memory_delta_mb": 12228.640625
+    },
+    {
+      "section": "Component Contribution Analysis",
+      "duration_seconds": 2489.522701025009,
+      "duration_formatted": "41m 29.52s",
+      "memory_mb": 157785.80078125,
+      "memory_delta_mb": 48517.84375
+    },
+    {
+      "section": "Results Saving and Reporting",
+      "duration_seconds": 2.1331300735473633,
+      "duration_formatted": "2.13s",
+      "memory_mb": 157788.0859375,
+      "memory_delta_mb": 2.28515625
+    }
+  ],
+  "section_count": 7
+}

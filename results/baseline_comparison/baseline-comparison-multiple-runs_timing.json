@@ -1,0 +1,13 @@
+{
+  "script_name": "baseline_comparison_multiple_runs",
+  "start_time": "2026-01-04T23:06:14.179468",
+  "end_time": "2026-01-05T02:08:11.485978",
+  "total_duration_seconds": 10917.3065097332,
+  "total_duration_formatted": "3h 1m 57.31s",
+  "start_memory_mb": 26.890625,
+  "end_memory_mb": 27.390625,
+  "memory_delta_mb": 0.5,
+  "peak_memory_mb": 27.390625,
+  "sections": [],
+  "section_count": 0
+}

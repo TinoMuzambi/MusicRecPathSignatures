@@ -1,0 +1,11 @@
+{
+  "n_train_users": 140,
+  "n_validation_users": 30,
+  "n_test_users": 30,
+  "n_train_interactions": 55965,
+  "n_validation_interactions": 12463,
+  "n_test_interactions": 12131,
+  "train_ratio": 0.7,
+  "validation_ratio": 0.15,
+  "test_ratio": 0.15
+}

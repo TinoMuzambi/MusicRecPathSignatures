@@ -1,0 +1,49 @@
+{
+  "script_name": "run_baseline_comparison",
+  "start_time": "2026-01-05T01:32:31.166313",
+  "end_time": "2026-01-05T02:08:09.184356",
+  "total_duration_seconds": 2138.0180423259735,
+  "total_duration_formatted": "35m 38.02s",
+  "start_memory_mb": 175.9375,
+  "end_memory_mb": 24134.03125,
+  "memory_delta_mb": 23958.09375,
+  "peak_memory_mb": 105343.9921875,
+  "sections": [
+    {
+      "section": "Data Loading",
+      "duration_seconds": 1388.8617701530457,
+      "duration_formatted": "23m 8.86s",
+      "memory_mb": 92702.1484375,
+      "memory_delta_mb": 92526.2109375
+    },
+    {
+      "section": "Synthetic User Generation",
+      "duration_seconds": 0.7514359951019287,
+      "duration_formatted": "0.75s",
+      "memory_mb": 92709.5234375,
+      "memory_delta_mb": 7.375
+    },
+    {
+      "section": "Model Training",
+      "duration_seconds": 701.2574729919434,
+      "duration_formatted": "11m 41.26s",
+      "memory_mb": 105313.32421875,
+      "memory_delta_mb": 12597.55078125
+    },
+    {
+      "section": "Model Evaluation",
+      "duration_seconds": 7.150839805603027,
+      "duration_formatted": "7.15s",
+      "memory_mb": 105336.26953125,
+      "memory_delta_mb": 22.9453125
+    },
+    {
+      "section": "Results Saving and Reporting",
+      "duration_seconds": 2.3424196243286133,
+      "duration_formatted": "2.34s",
+      "memory_mb": 105343.9921875,
+      "memory_delta_mb": 7.72265625
+    }
+  ],
+  "section_count": 5
+}

@@ -1,0 +1,62 @@
+{
+  "basic_statistics": {
+    "total_tracks": 4000,
+    "total_features": 1,
+    "unique_artists": 2045,
+    "unique_genres": 16,
+    "date_range": {
+      "earliest": null,
+      "latest": null
+    }
+  },
+  "feature_statistics": {},
+  "duration_statistics": {},
+  "genre_statistics": {
+    "genre_counts": {
+      "Rock": 1035,
+      "Electronic": 915,
+      "Experimental": 292,
+      "Hip-Hop": 284,
+      "Classical": 195,
+      "Folk": 180,
+      "Old-Time / Historic": 179,
+      "Jazz": 158,
+      "Instrumental": 153,
+      "Pop": 128,
+      "Country": 127,
+      "Soul-RnB": 123,
+      "Spoken": 118,
+      "Blues": 74,
+      "Easy Listening": 21,
+      "International": 18
+    },
+    "genre_percentages": {
+      "Rock": 25.874999999999996,
+      "Electronic": 22.875,
+      "Experimental": 7.3,
+      "Hip-Hop": 7.1,
+      "Classical": 4.875,
+      "Folk": 4.5,
+      "Old-Time / Historic": 4.475,
+      "Jazz": 3.95,
+      "Instrumental": 3.8249999999999997,
+      "Pop": 3.2,
+      "Country": 3.175,
+      "Soul-RnB": 3.075,
+      "Spoken": 2.9499999999999997,
+      "Blues": 1.8499999999999999,
+      "Easy Listening": 0.525,
+      "International": 0.44999999999999996
+    },
+    "most_common_genre": "Rock",
+    "least_common_genre": "International",
+    "genre_diversity": 0.004
+  },
+  "correlations": {},
+  "outliers": {},
+  "metadata": {
+    "total_tracks": 4000,
+    "total_features": 1,
+    "analysis_timestamp": "2025-12-31T15:44:03.716742"
+  }
+}

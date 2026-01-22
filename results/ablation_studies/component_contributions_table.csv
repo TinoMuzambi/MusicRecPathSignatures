@@ -1,0 +1,5 @@
+component,precision@5,recall@5,diversity@5
+path_signatures_only,0.15254065040650408,0.001565272673779,4.5241611844651905e-05
+softmax_only,0.0,0.0,0.0
+temperature_scaling_only,0.15254065040650408,0.001565272673779,0.9997470833261158
+hybrid_full,0.0,0.0,0.0

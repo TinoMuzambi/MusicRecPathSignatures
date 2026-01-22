@@ -1,0 +1,42 @@
+{
+  "script_name": "generate_predictions",
+  "start_time": "2026-01-02T11:43:44.109748",
+  "end_time": "2026-01-02T12:09:24.554367",
+  "total_duration_seconds": 1540.4446187019348,
+  "total_duration_formatted": "25m 40.44s",
+  "start_memory_mb": 147.640625,
+  "end_memory_mb": 92684.07421875,
+  "memory_delta_mb": 92536.43359375,
+  "peak_memory_mb": 92684.07421875,
+  "sections": [
+    {
+      "section": "Data Loading",
+      "duration_seconds": 1463.1879751682281,
+      "duration_formatted": "24m 23.19s",
+      "memory_mb": 92676.83984375,
+      "memory_delta_mb": 92529.19921875
+    },
+    {
+      "section": "Path Signature Computation",
+      "duration_seconds": 75.39342856407166,
+      "duration_formatted": "1m 15.39s",
+      "memory_mb": 92681.19921875,
+      "memory_delta_mb": 4.359375
+    },
+    {
+      "section": "Model Training and Prediction",
+      "duration_seconds": 1.8523972034454346,
+      "duration_formatted": "1.85s",
+      "memory_mb": 92683.94921875,
+      "memory_delta_mb": 2.75
+    },
+    {
+      "section": "Results Saving",
+      "duration_seconds": 0.00925135612487793,
+      "duration_formatted": "0.01s",
+      "memory_mb": 92684.07421875,
+      "memory_delta_mb": 0.125
+    }
+  ],
+  "section_count": 4
+}

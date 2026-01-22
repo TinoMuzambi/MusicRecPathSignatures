@@ -1,0 +1,35 @@
+{
+  "script_name": "robust_track_processing",
+  "start_time": "2025-12-31T13:24:57.565197",
+  "end_time": "2025-12-31T15:19:52.770668",
+  "total_duration_seconds": 6895.2054708004,
+  "total_duration_formatted": "1h 54m 55.21s",
+  "start_memory_mb": 65.515625,
+  "end_memory_mb": 23085.3984375,
+  "memory_delta_mb": 23019.8828125,
+  "peak_memory_mb": 23311.09375,
+  "sections": [
+    {
+      "section": "Initial Track Selection",
+      "duration_seconds": 5.72261905670166,
+      "duration_formatted": "5.72s",
+      "memory_mb": 189.546875,
+      "memory_delta_mb": 124.03125
+    },
+    {
+      "section": "Track Processing (Audio Feature Extraction)",
+      "duration_seconds": 1275.5891678333282,
+      "duration_formatted": "21m 15.59s",
+      "memory_mb": 14380.3359375,
+      "memory_delta_mb": 14190.7890625
+    },
+    {
+      "section": "Results Saving",
+      "duration_seconds": 5613.6204698085785,
+      "duration_formatted": "1h 33m 33.62s",
+      "memory_mb": 23311.09375,
+      "memory_delta_mb": 8930.7578125
+    }
+  ],
+  "section_count": 3
+}

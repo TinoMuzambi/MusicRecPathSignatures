@@ -1,0 +1,35 @@
+{
+  "script_name": "generate_dissertation_figures",
+  "start_time": "2026-01-02T12:39:46.007978",
+  "end_time": "2026-01-02T12:39:47.734505",
+  "total_duration_seconds": 1.7265264987945557,
+  "total_duration_formatted": "1.73s",
+  "start_memory_mb": 137.28515625,
+  "end_memory_mb": 221.9140625,
+  "memory_delta_mb": 84.62890625,
+  "peak_memory_mb": 221.9140625,
+  "sections": [
+    {
+      "section": "Figure 05: Method Comparison",
+      "duration_seconds": 0.35622739791870117,
+      "duration_formatted": "0.36s",
+      "memory_mb": 151.15625,
+      "memory_delta_mb": 13.87109375
+    },
+    {
+      "section": "System Architecture Diagram",
+      "duration_seconds": 0.9677042961120605,
+      "duration_formatted": "0.97s",
+      "memory_mb": 200.6640625,
+      "memory_delta_mb": 49.5078125
+    },
+    {
+      "section": "Figure 06: Significance Heatmap",
+      "duration_seconds": 0.40158677101135254,
+      "duration_formatted": "0.40s",
+      "memory_mb": 221.9140625,
+      "memory_delta_mb": 21.25
+    }
+  ],
+  "section_count": 3
+}

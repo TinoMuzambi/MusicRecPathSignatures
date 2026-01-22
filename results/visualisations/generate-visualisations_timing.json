@@ -1,0 +1,49 @@
+{
+  "script_name": "generate_visualisations",
+  "start_time": "2026-01-02T12:10:02.379401",
+  "end_time": "2026-01-02T12:39:07.569510",
+  "total_duration_seconds": 1745.1901087760925,
+  "total_duration_formatted": "29m 5.19s",
+  "start_memory_mb": 169.1015625,
+  "end_memory_mb": 105154.98046875,
+  "memory_delta_mb": 104985.87890625,
+  "peak_memory_mb": 105154.98046875,
+  "sections": [
+    {
+      "section": "Data Loading",
+      "duration_seconds": 0.011786460876464844,
+      "duration_formatted": "0.01s",
+      "memory_mb": 172.9765625,
+      "memory_delta_mb": 3.875
+    },
+    {
+      "section": "Category Distribution Plot",
+      "duration_seconds": 0.5039031505584717,
+      "duration_formatted": "0.50s",
+      "memory_mb": 177.015625,
+      "memory_delta_mb": 4.0390625
+    },
+    {
+      "section": "Similarity Matrix Heatmap",
+      "duration_seconds": 48.36412191390991,
+      "duration_formatted": "48.36s",
+      "memory_mb": 1054.19140625,
+      "memory_delta_mb": 877.17578125
+    },
+    {
+      "section": "Feature Embedding Computation and Plots",
+      "duration_seconds": 1695.3354585170746,
+      "duration_formatted": "28m 15.34s",
+      "memory_mb": 105151.10546875,
+      "memory_delta_mb": 104096.9140625
+    },
+    {
+      "section": "Confusion Matrix Plot",
+      "duration_seconds": 0.97310471534729,
+      "duration_formatted": "0.97s",
+      "memory_mb": 105154.98046875,
+      "memory_delta_mb": 3.875
+    }
+  ],
+  "section_count": 5
+}

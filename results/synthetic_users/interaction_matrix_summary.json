@@ -1,0 +1,9 @@
+{
+  "n_users": 200,
+  "n_items": 4000,
+  "total_interactions": 80559,
+  "sparsity": 0.8993012499999999,
+  "density": 0.10069875,
+  "avg_interactions_per_user": 402.795,
+  "avg_interactions_per_item": 20.13975
+}

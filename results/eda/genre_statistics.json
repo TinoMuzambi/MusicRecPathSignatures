@@ -1,0 +1,51 @@
+{
+  "genre_distribution": {
+    "genre_counts": {
+      "Rock": 1035,
+      "Electronic": 915,
+      "Experimental": 292,
+      "Hip-Hop": 284,
+      "Classical": 195,
+      "Folk": 180,
+      "Old-Time / Historic": 179,
+      "Jazz": 158,
+      "Instrumental": 153,
+      "Pop": 128,
+      "Country": 127,
+      "Soul-RnB": 123,
+      "Spoken": 118,
+      "Blues": 74,
+      "Easy Listening": 21,
+      "International": 18
+    },
+    "genre_percentages": {
+      "Rock": 25.87,
+      "Electronic": 22.88,
+      "Experimental": 7.3,
+      "Hip-Hop": 7.1,
+      "Classical": 4.88,
+      "Folk": 4.5,
+      "Old-Time / Historic": 4.47,
+      "Jazz": 3.95,
+      "Instrumental": 3.82,
+      "Pop": 3.2,
+      "Country": 3.18,
+      "Soul-RnB": 3.08,
+      "Spoken": 2.95,
+      "Blues": 1.85,
+      "Easy Listening": 0.52,
+      "International": 0.45
+    },
+    "genre_balance": {
+      "most_common": "Rock",
+      "least_common": "International",
+      "balance_ratio": 57.5
+    }
+  },
+  "genre_features": {},
+  "genre_similarity": {},
+  "metadata": {
+    "total_genres": 16,
+    "analysis_timestamp": "2025-12-31T15:44:03.744861"
+  }
+}

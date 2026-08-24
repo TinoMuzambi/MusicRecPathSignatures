@@ -1,469 +1,427 @@
 #!/usr/bin/env python3
 # pylint: disable=broad-except
-"""
-Run baseline comparison multiple times and aggregate results.
+"""Pure seed-aware MR-05 aggregation helpers used by the canonical runner.
 
-This script addresses non-determinism in LightFM-based models by running
-multiple iterations and reporting mean ± std metrics.
-
-Usage:
-    python run_baseline_comparison_multiple_runs.py --n-runs 5 --features-file ... --tracks-json ...
+The historical subprocess/result-loading CLI is deliberately retired in
+MR-06.  No function in this module starts a run or reads legacy results.
 """
 
-import argparse
 import json
-import sys
-import subprocess
-import time
-import psutil
 import os
 from pathlib import Path
-from typing import Dict, List, Any
+from collections.abc import Mapping, Sequence
+from typing import Dict
+
+for _thread_variable in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+):
+    os.environ[_thread_variable] = "1"
+
 import numpy as np
 
-from src.utils.logger_config import setup_logger, configure_logging
-from src.utils.timing import TimingReport
-
-logger = setup_logger("baseline_comparison_multiple_runs")
-
-
-def aggregate_results(all_runs: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Aggregate results across multiple runs, computing mean and std.
-
-    Args:
-        all_runs: List of result dictionaries from individual runs
-
-    Returns:
-        Aggregated results dictionary with mean and std for each metric
-    """
-    if not all_runs:
-        raise ValueError("No runs to aggregate")
-
-    models = list(all_runs[0].keys())
-    aggregated = {}
-
-    for model_name in models:
-        # Collect all results for this model across runs
-        model_results = []
-        for run in all_runs:
-            if model_name in run and run[model_name]:
-                model_results.append(run[model_name])
-
-        if not model_results:
-            logger.warning("No results found for model %s", model_name)
-            aggregated[model_name] = {}
-            continue
-
-        aggregated[model_name] = {}
-
-        # Aggregate scalar metrics (map, prediction_time, avg_prediction_time)
-        for metric in ["map", "prediction_time", "avg_prediction_time"]:
-            values = [r.get(metric, 0) for r in model_results if metric in r]
-            if values:
-                aggregated[model_name][metric] = {
-                    "mean": float(np.mean(values)),
-                    "std": float(np.std(values)),
-                    "min": float(np.min(values)),
-                    "max": float(np.max(values)),
-                    "n_runs": len(values),
-                    "values": values,
-                }
-            else:
-                aggregated[model_name][metric] = {
-                    "mean": 0.0,
-                    "std": 0.0,
-                    "min": 0.0,
-                    "max": 0.0,
-                    "n_runs": 0,
-                    "values": [],
-                }
-
-        # Aggregate per-K metrics (precision, recall, ndcg, etc.)
-        for metric in [
-            "precision",
-            "recall",
-            "ndcg",
-            "diversity",
-            "novelty",
-            "coverage",
-        ]:
-            aggregated[model_name][metric] = {}
-            k_values = ["1", "5", "10"]
-            for k in k_values:
-                values = [
-                    r.get(metric, {}).get(k, 0)
-                    for r in model_results
-                    if metric in r and k in r.get(metric, {})
-                ]
-                if values:
-                    aggregated[model_name][metric][k] = {
-                        "mean": float(np.mean(values)),
-                        "std": float(np.std(values)),
-                        "min": float(np.min(values)),
-                        "max": float(np.max(values)),
-                        "n_runs": len(values),
-                        "values": values,
-                    }
-                else:
-                    aggregated[model_name][metric][k] = {
-                        "mean": 0.0,
-                        "std": 0.0,
-                        "min": 0.0,
-                        "max": 0.0,
-                        "n_runs": 0,
-                        "values": [],
-                    }
-
-        # Aggregate per-user metrics
-        # For each run, compute mean per-user metric, then aggregate across runs
-        for metric in ["per_user_precision", "per_user_recall"]:
-            aggregated[model_name][metric] = {}
-            k_values = ["1", "5", "10"]
-            for k in k_values:
-                per_run_means = []
-                for run_result in model_results:
-                    per_user_values = run_result.get(metric, {}).get(k, [])
-                    if per_user_values and len(per_user_values) > 0:
-                        # Compute mean across users for this run
-                        per_run_means.append(float(np.mean(per_user_values)))
-                    else:
-                        per_run_means.append(0.0)
-
-                if per_run_means:
-                    aggregated[model_name][metric][k] = {
-                        "mean": float(np.mean(per_run_means)),
-                        "std": float(np.std(per_run_means)),
-                        "min": float(np.min(per_run_means)),
-                        "max": float(np.max(per_run_means)),
-                        "n_runs": len(per_run_means),
-                        "values": per_run_means,
-                    }
-                else:
-                    aggregated[model_name][metric][k] = {
-                        "mean": 0.0,
-                        "std": 0.0,
-                        "min": 0.0,
-                        "max": 0.0,
-                        "n_runs": 0,
-                        "values": [],
-                    }
-
-    return aggregated
+import src.analysis.statistical_tests as statistical_module
+from src.evaluation.experiment_protocol import ProtocolError, normalise_id
+from src.experiment_config import (
+    CANONICAL_BASELINE_IDS,
+    DETERMINISTIC_METHOD_IDS,
+    PATH_SIGNATURE_METHOD_ID,
+    STOCHASTIC_METHOD_IDS,
+    CANONICAL_EXPERIMENT,
+)
 
 
-def print_summary(aggregated: Dict[str, Any]):
-    """Print a summary of aggregated results."""
-    print("\n" + "=" * 80)
-    print("AGGREGATED RESULTS SUMMARY (Mean ± Std across runs)")
-    print("=" * 80)
-
-    models = [
-        "User-based CF",
-        "Item-based CF",
-        "Content-based Filter",
-        "SVD",
-        "NMF",
-        "Hybrid",
-        "Path Signature",
-    ]
-
-    for model_name in models:
-        if model_name not in aggregated:
-            continue
-
-        metrics = aggregated[model_name]
-        print(f"\n{model_name}:")
-
-        # Print key metrics
-        if "precision" in metrics and "5" in metrics["precision"]:
-            prec = metrics["precision"]["5"]
-            print(
-                f"  Precision@5: {prec['mean']:.4f} ± {prec['std']:.4f} "
-                f"(min={prec['min']:.4f}, max={prec['max']:.4f}, n={prec['n_runs']})"
-            )
-
-        if "recall" in metrics and "5" in metrics["recall"]:
-            recall = metrics["recall"]["5"]
-            print(f"  Recall@5: {recall['mean']:.6f} ± {recall['std']:.6f}")
-
-        if "ndcg" in metrics and "5" in metrics["ndcg"]:
-            ndcg = metrics["ndcg"]["5"]
-            print(f"  NDCG@5: {ndcg['mean']:.4f} ± {ndcg['std']:.4f}")
-
-        if "map" in metrics:
-            map_val = metrics["map"]
-            print(f"  MAP: {map_val['mean']:.4f} ± {map_val['std']:.4f}")
-
-        if "avg_prediction_time" in metrics:
-            time_val = metrics["avg_prediction_time"]
-            print(
-                f"  Avg Prediction Time: {time_val['mean']:.4f}s ± {time_val['std']:.4f}s"
-            )
-
-    print("\n" + "=" * 80)
+MODEL_SEEDS = CANONICAL_EXPERIMENT.model_seeds
+CANONICAL_K_VALUES = (1, 5, 10)
 
 
-def main():
-    """Main function."""
-    parser = argparse.ArgumentParser(
-        description="Run baseline comparison multiple times and aggregate results"
+def method_seed_key(method_id: str, seed: object = None) -> str:
+    """Return the frozen distinct output key for one method/seed pair."""
+
+    if not isinstance(method_id, str) or not method_id:
+        raise ValueError("method ID must be a non-empty string")
+    if "/" in method_id or "\\" in method_id or "__seed_" in method_id:
+        raise ValueError("method ID contains a reserved path or seed marker")
+    if method_id in DETERMINISTIC_METHOD_IDS:
+        if seed is not None:
+            raise ValueError("deterministic methods must not declare a model seed")
+        return method_id
+    if method_id not in STOCHASTIC_METHOD_IDS:
+        raise ValueError(f"unknown canonical method ID: {method_id}")
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed not in MODEL_SEEDS:
+        raise ValueError("stochastic methods require one exactly typed declared seed")
+    return f"{method_id}__seed_{seed}"
+
+
+def method_seed_rows_path(method_id: str, seed: object = None) -> str:
+    """Return the frozen portable JSONL path for one method/seed output."""
+
+    return f"methods/{method_seed_key(method_id, seed)}.jsonl"
+
+
+def expected_method_seed_keys() -> tuple[str, ...]:
+    """Return every deterministic and stochastic output key in frozen order."""
+
+    deterministic = tuple(method_seed_key(method_id) for method_id in DETERMINISTIC_METHOD_IDS)
+    stochastic = tuple(
+        method_seed_key(method_id, seed)
+        for method_id in STOCHASTIC_METHOD_IDS
+        for seed in MODEL_SEEDS
     )
-    parser.add_argument(
-        "--n-runs",
-        type=int,
-        default=5,
-        help="Number of runs to perform (default: 5)",
-    )
-    parser.add_argument(
-        "--features-file",
-        default="./data/processed_tracks/features.json",
-        help="Path to features JSON file",
-    )
-    parser.add_argument(
-        "--tracks-json",
-        default="./data/processed_tracks/selected_tracks.json",
-        help="Path to tracks metadata JSON file",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default="./results/baseline_comparison",
-        help="Output directory for results",
-    )
-    parser.add_argument(
-        "--n-users",
-        type=int,
-        default=200,
-        help="Number of synthetic users to create (default: 200)",
-    )
-    parser.add_argument(
-        "--test-ratio",
-        type=float,
-        default=0.15,
-        help="Ratio of users to use for testing (default: 0.15)",
-    )
-    parser.add_argument(
-        "--validation-ratio",
-        type=float,
-        default=0.15,
-        help="Ratio of users to use for validation (default: 0.15)",
-    )
-    parser.add_argument(
-        "--log-level",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        default="INFO",
-        help="Logging level",
-    )
-    parser.add_argument(
-        "--quality-report",
-        action="store_true",
-        help="Generate detailed data quality reports for each model",
-    )
+    return deterministic + stochastic
 
-    args = parser.parse_args()
 
-    # Create output directory
-    output_path = Path(args.output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+def validate_method_seed_outputs(outputs: Mapping[str, object]) -> None:
+    """Require exactly one distinct output for every frozen method/seed key."""
 
-    # Set up logging
-    log_file = output_path / "baseline_comparison_multiple_runs.log"
-    configure_logging(args.log_level, log_file=str(log_file))
-    logger.info("Logging to file: %s", log_file)
-    logger.info("Starting %d runs of baseline comparison...", args.n_runs)
+    if not isinstance(outputs, Mapping):
+        raise ValueError("method/seed outputs must be a mapping")
+    expected = expected_method_seed_keys()
+    if tuple(sorted(outputs)) != tuple(sorted(expected)):
+        missing = sorted(set(expected) - set(outputs))
+        extra = sorted(set(outputs) - set(expected))
+        raise ValueError(f"method/seed output keys mismatch; missing={missing}; extra={extra}")
 
-    # Initialize timing for overall process
-    overall_timing = TimingReport("baseline_comparison_multiple_runs")
-    overall_timing.start()
 
-    all_runs = []
-    successful_runs = 0
-
-    # Results file path (will be overwritten each run, so we load immediately)
-    results_file = output_path / "baseline_comparison_results.json"
-
-    # Get the path to the baseline comparison script
-    script_dir = Path(__file__).parent
-    baseline_script = script_dir / "run_baseline_comparison.py"
-
-    if not baseline_script.exists():
-        logger.error("Baseline comparison script not found: %s", baseline_script)
-        sys.exit(1)
-
-    # Get initial memory usage
-    process = psutil.Process(os.getpid())
-    initial_memory_mb = process.memory_info().rss / 1024 / 1024
-    logger.info("Initial memory usage: %.2f MB", initial_memory_mb)
-
-    for run_num in range(1, args.n_runs + 1):
-        logger.info("=" * 80)
-        logger.info("Starting run %d/%d (in separate process)", run_num, args.n_runs)
-        logger.info("=" * 80)
-
-        # Check memory before run
-        memory_before_mb = process.memory_info().rss / 1024 / 1024
-        logger.info(
-            "Main process memory before run %d: %.2f MB", run_num, memory_before_mb
-        )
-
-        try:
-            # Build command to run baseline comparison in a separate process
-            # This isolates memory completely - each subprocess gets its own memory space
-            cmd = [
-                sys.executable,  # Use the same Python interpreter
-                str(baseline_script),
-                "--features-file",
-                args.features_file,
-                "--tracks-json",
-                args.tracks_json,
-                "--output-dir",
-                args.output_dir,
-                "--n-users",
-                str(args.n_users),
-                "--test-ratio",
-                str(args.test_ratio),
-                "--validation-ratio",
-                str(args.validation_ratio),
-                "--log-level",
-                args.log_level,
-            ]
-
-            if args.quality_report:
-                cmd.append("--quality-report")
-
-            logger.debug("Running command: %s", " ".join(cmd))
-
-            # Run in subprocess - this isolates memory completely
-            # When subprocess exits, all its memory is freed automatically
-            start_time = time.time()
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=7200,  # 2 hour timeout per run
-                check=False,  # Don't raise on non-zero exit, we'll check manually
-                cwd=str(script_dir.parent.parent),  # Run from code directory
-            )
-            elapsed_time = time.time() - start_time
-
-            # Check if subprocess succeeded
-            if result.returncode == 0:
-                logger.info(
-                    "Run %d/%d completed successfully in %.2f seconds",
-                    run_num,
-                    args.n_runs,
-                    elapsed_time,
-                )
-
-                # Load results immediately after subprocess completes
-                if results_file.exists():
-                    with open(results_file, "r", encoding="utf-8") as f:
-                        run_results = json.load(f)
-                        all_runs.append(run_results)
-                        successful_runs += 1
-                        logger.info(
-                            "Results loaded for run %d/%d", run_num, args.n_runs
-                        )
-                else:
-                    logger.warning("Results file not found after run %d", run_num)
-
-                # Log subprocess output if there are warnings
-                if result.stderr:
-                    logger.debug(
-                        "Subprocess stderr (run %d):\n%s", run_num, result.stderr
-                    )
-            else:
-                logger.error(
-                    "Run %d/%d failed with return code %d",
-                    run_num,
-                    args.n_runs,
-                    result.returncode,
-                )
-                if result.stdout:
-                    logger.error("Subprocess stdout:\n%s", result.stdout)
-                if result.stderr:
-                    logger.error("Subprocess stderr:\n%s", result.stderr)
-                # Continue with next run
-                continue
-
-        except subprocess.TimeoutExpired:
-            logger.error("Run %d/%d timed out after 2 hours", run_num, args.n_runs)
-            # Continue with next run
-            continue
-        except Exception as e:
-            logger.error(
-                "Error running subprocess for run %d/%d: %s",
-                run_num,
-                args.n_runs,
-                str(e),
-            )
-            logger.exception("Full traceback:")
-            # Continue with next run
-            continue
-
-        # Check memory after run (should be similar since subprocess isolated memory)
-        memory_after_mb = process.memory_info().rss / 1024 / 1024
-        logger.info(
-            "Main process memory after run %d: %.2f MB (delta: %.2f MB)",
-            run_num,
-            memory_after_mb,
-            memory_after_mb - memory_before_mb,
-        )
-
-        # Small delay between runs
-        if run_num < args.n_runs:
-            logger.debug("Waiting 2 seconds before next run...")
-            time.sleep(2)
-
-    overall_timing.stop()
-
-    if not all_runs:
-        logger.error("No successful runs completed! Cannot aggregate results.")
-        overall_timing.save_report(output_path)
-        sys.exit(1)
-
-    logger.info("=" * 80)
-    logger.info("Aggregating results across %d successful runs...", successful_runs)
-    logger.info("=" * 80)
-
+def _canonical_track_ids(values: Sequence[object]) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes, bytearray)):
+        raise ValueError("track IDs must be supplied as a collection")
     try:
-        # Aggregate results
-        aggregated = aggregate_results(all_runs)
+        normalised = tuple(normalise_id(value, kind="track") for value in values)
+    except ProtocolError as error:
+        raise ValueError(str(error)) from error
+    if len(set(normalised)) != len(normalised):
+        raise ValueError("duplicate track ID after normalisation")
+    return tuple(sorted(normalised))
 
-        # Save aggregated results
-        aggregated_file = output_path / "baseline_comparison_results_aggregated.json"
-        with open(aggregated_file, "w", encoding="utf-8") as f:
-            json.dump(aggregated, f, indent=2, default=str)
-        logger.info("Aggregated results saved to %s", aggregated_file)
 
-        # Also save individual runs for reference (backup)
-        individual_runs_file = (
-            output_path / "baseline_comparison_results_individual_runs.json"
+def _canonical_user_id(value: object) -> str:
+    try:
+        return normalise_id(value, kind="user")
+    except ProtocolError as error:
+        raise ValueError(str(error)) from error
+
+
+def _cutoff_value(values: Mapping[object, object], k: int, *, context: str) -> object:
+    """Read one cutoff from in-memory or JSON-round-tripped metric keys."""
+
+    present = [key for key in (k, str(k)) if key in values]
+    if len(present) != 1:
+        raise ValueError(f"{context} must contain exactly one representation of cutoff {k}")
+    return values[present[0]]
+
+
+def _validated_seed_rows(
+    rows_by_seed: Mapping[object, Mapping[object, Mapping[str, object]]],
+) -> tuple[tuple[str, ...], Dict[int, Dict[str, Mapping[str, object]]]]:
+    if not isinstance(rows_by_seed, Mapping):
+        raise ValueError("stochastic rows must be a seed mapping")
+    raw_seeds = tuple(rows_by_seed)
+    if any(isinstance(seed, bool) or not isinstance(seed, int) for seed in raw_seeds):
+        raise ValueError("model seeds must be exactly typed integers")
+    if set(raw_seeds) != set(MODEL_SEEDS):
+        raise ValueError("stochastic rows must contain all five declared seeds exactly once")
+    result: Dict[int, Dict[str, Mapping[str, object]]] = {}
+    expected_users = None
+    for seed in MODEL_SEEDS:
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ValueError("model seeds must be exactly typed integers")
+        raw_rows = rows_by_seed[seed]
+        if not isinstance(raw_rows, Mapping) or not raw_rows:
+            raise ValueError(f"seed {seed} rows must be a non-empty user mapping")
+        rows: Dict[str, Mapping[str, object]] = {}
+        for raw_user_id, row in raw_rows.items():
+            user_id = _canonical_user_id(raw_user_id)
+            if user_id in rows:
+                raise ValueError(f"seed {seed} has duplicate user ID after normalisation")
+            if not isinstance(row, Mapping):
+                raise ValueError(f"seed {seed}/{user_id} row must be a mapping")
+            if _canonical_user_id(row.get("user_id")) != user_id:
+                raise ValueError(f"seed {seed}/{user_id} row user ID mismatch")
+            recommendations = row.get("recommendations")
+            scores = row.get("scores")
+            if isinstance(recommendations, (str, bytes, bytearray)) or not isinstance(
+                recommendations, Sequence
+            ):
+                raise ValueError(f"seed {seed}/{user_id} recommendations must be ranked")
+            ranked_ids = tuple(
+                normalise_id(value, kind="recommendation") for value in recommendations
+            )
+            if len(set(ranked_ids)) != len(ranked_ids):
+                raise ValueError(f"seed {seed}/{user_id} recommendations contain duplicates")
+            try:
+                numeric_scores = np.asarray(tuple(scores), dtype=np.float64)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"seed {seed}/{user_id} scores must be numeric") from error
+            if (
+                numeric_scores.ndim != 1
+                or numeric_scores.shape[0] != len(ranked_ids)
+                or not np.isfinite(numeric_scores).all()
+            ):
+                raise ValueError(f"seed {seed}/{user_id} scores are invalid")
+            metrics = row.get("metrics")
+            if not isinstance(metrics, Mapping):
+                raise ValueError(f"seed {seed}/{user_id} metrics must be a mapping")
+            for metric_name in ("precision", "recall", "ndcg"):
+                values = metrics.get(metric_name)
+                if not isinstance(values, Mapping):
+                    raise ValueError(f"seed {seed}/{user_id} missing {metric_name}")
+                for k in CANONICAL_K_VALUES:
+                    try:
+                        value = float(_cutoff_value(values, k, context=metric_name))
+                    except (TypeError, ValueError) as error:
+                        raise ValueError(
+                            f"seed {seed}/{user_id} missing {metric_name}@{k}"
+                        ) from error
+                    if not np.isfinite(value):
+                        raise ValueError(f"seed {seed}/{user_id} metric must be finite")
+            try:
+                ap_at_10 = float(metrics["ap@10"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"seed {seed}/{user_id} missing AP@10") from error
+            if not np.isfinite(ap_at_10):
+                raise ValueError(f"seed {seed}/{user_id} AP@10 must be finite")
+            for metric_name in ("diversity", "novelty"):
+                values = metrics.get(metric_name)
+                if not isinstance(values, Mapping):
+                    raise ValueError(f"seed {seed}/{user_id} missing {metric_name}")
+                for k in CANONICAL_K_VALUES:
+                    record = _cutoff_value(values, k, context=metric_name)
+                    if not isinstance(record, Mapping):
+                        raise ValueError(
+                            f"seed {seed}/{user_id} missing {metric_name}@{k} availability"
+                        )
+                    if record.get("status") == "available":
+                        try:
+                            optional_value = float(record["value"])
+                        except (KeyError, TypeError, ValueError) as error:
+                            raise ValueError(
+                                f"seed {seed}/{user_id} invalid available {metric_name}@{k}"
+                            ) from error
+                        if not np.isfinite(optional_value):
+                            raise ValueError(
+                                f"seed {seed}/{user_id} optional metric must be finite"
+                            )
+                    elif record.get("status") == "unavailable":
+                        if not record.get("reason_code") or "value" in record:
+                            raise ValueError(
+                                f"seed {seed}/{user_id} invalid unavailable {metric_name}@{k}"
+                            )
+                    else:
+                        raise ValueError(
+                            f"seed {seed}/{user_id} invalid {metric_name}@{k} status"
+                        )
+            rows[user_id] = row
+        users = set(rows)
+        if expected_users is None:
+            expected_users = users
+        elif users != expected_users:
+            raise ValueError("every model seed must contain the same user set")
+        result[seed] = rows
+    return tuple(sorted(expected_users or ())), result
+
+
+def bootstrap_seed_coverage(
+    rows_by_seed: Mapping[object, Mapping[object, Mapping[str, object]]],
+    *,
+    catalogue_ids: Sequence[object],
+    sampled_user_ids: Sequence[object],
+    k: int,
+) -> float:
+    """Compute seed-wise set coverage for one aligned bootstrap user multiset."""
+
+    if k not in CANONICAL_K_VALUES:
+        raise ValueError("coverage k must be one of 1, 5, 10")
+    user_ids, rows = _validated_seed_rows(rows_by_seed)
+    catalogue = _canonical_track_ids(catalogue_ids)
+    if not catalogue:
+        raise ValueError("catalogue must not be empty")
+    sampled = tuple(_canonical_user_id(user_id) for user_id in sampled_user_ids)
+    if not sampled or not set(sampled) <= set(user_ids):
+        raise ValueError("bootstrap sample contains an unknown or empty user set")
+    coverages = []
+    for seed in MODEL_SEEDS:
+        recommended = {
+            normalise_id(track_id, kind="recommendation")
+            for user_id in sampled
+            for track_id in rows[seed][user_id]["recommendations"][:k]
+        }
+        if not recommended <= set(catalogue):
+            raise ValueError("recommendation outside common catalogue")
+        coverages.append(len(recommended) / len(catalogue))
+    return float(np.mean(coverages))
+
+
+def aggregate_stochastic_rows(
+    rows_by_seed: Mapping[object, Mapping[object, Mapping[str, object]]],
+    *,
+    catalogue_ids: Sequence[object],
+) -> Dict[str, object]:
+    """Average per-user metrics only after each seed has produced a ranking."""
+
+    user_ids, rows = _validated_seed_rows(rows_by_seed)
+    catalogue = _canonical_track_ids(catalogue_ids)
+    if not catalogue:
+        raise ValueError("catalogue must not be empty")
+    per_user: Dict[str, Dict[str, object]] = {}
+    for user_id in user_ids:
+        per_user[user_id] = {
+            metric_name: {
+                k: float(
+                    np.mean(
+                        [
+                            float(
+                                _cutoff_value(
+                                    rows[seed][user_id]["metrics"][metric_name],
+                                    k,
+                                    context=metric_name,
+                                )
+                            )
+                            for seed in MODEL_SEEDS
+                        ]
+                    )
+                )
+                for k in CANONICAL_K_VALUES
+            }
+            for metric_name in ("precision", "recall", "ndcg")
+        }
+        per_user[user_id]["ap@10"] = float(
+            np.mean(
+                [float(rows[seed][user_id]["metrics"]["ap@10"]) for seed in MODEL_SEEDS]
+            )
         )
-        with open(individual_runs_file, "w", encoding="utf-8") as f:
-            json.dump(all_runs, f, indent=2, default=str)
-        logger.info("Individual run results saved to %s", individual_runs_file)
+        for metric_name in ("diversity", "novelty"):
+            per_user[user_id][metric_name] = {}
+            for k in CANONICAL_K_VALUES:
+                records = [
+                    _cutoff_value(
+                        rows[seed][user_id]["metrics"][metric_name],
+                        k,
+                        context=metric_name,
+                    )
+                    for seed in MODEL_SEEDS
+                ]
+                if all(record["status"] == "available" for record in records):
+                    per_user[user_id][metric_name][k] = {
+                        "status": "available",
+                        "value": float(
+                            np.mean([float(record["value"]) for record in records])
+                        ),
+                    }
+                else:
+                    unavailable = [
+                        record for record in records if record["status"] == "unavailable"
+                    ]
+                    reason_codes = tuple(
+                        sorted({str(record["reason_code"]) for record in unavailable})
+                    )
+                    per_user[user_id][metric_name][k] = {
+                        "status": "unavailable",
+                        "reason_code": (
+                            reason_codes[0]
+                            if len(reason_codes) == 1 and len(unavailable) == len(records)
+                            else "seed_metric_unavailable"
+                        ),
+                        "reason": "one or more seed-level optional metrics are unavailable",
+                    }
 
-        # Print summary
-        print_summary(aggregated)
+    coverage = {
+        k: bootstrap_seed_coverage(
+            rows,
+            catalogue_ids=catalogue,
+            sampled_user_ids=user_ids,
+            k=k,
+        )
+        for k in CANONICAL_K_VALUES
+    }
+    seed_aggregates: Dict[str, Dict[int, float]] = {}
+    for metric_name in ("precision", "recall", "ndcg"):
+        for k in CANONICAL_K_VALUES:
+            label = f"{metric_name}@{k}"
+            seed_aggregates[label] = {
+                seed: float(
+                    np.mean(
+                        [
+                            float(
+                                _cutoff_value(
+                                    rows[seed][user]["metrics"][metric_name],
+                                    k,
+                                    context=metric_name,
+                                )
+                            )
+                            for user in user_ids
+                        ]
+                    )
+                )
+                for seed in MODEL_SEEDS
+            }
+    seed_aggregates["map@10"] = {
+        seed: float(
+            np.mean([float(rows[seed][user]["metrics"]["ap@10"]) for user in user_ids])
+        )
+        for seed in MODEL_SEEDS
+    }
+    for k in CANONICAL_K_VALUES:
+        seed_aggregates[f"coverage@{k}"] = {}
+        for seed in MODEL_SEEDS:
+            recommended = {
+                normalise_id(track_id, kind="recommendation")
+                for user_id in user_ids
+                for track_id in rows[seed][user_id]["recommendations"][:k]
+            }
+            if not recommended <= set(catalogue):
+                raise ValueError("recommendation outside common catalogue")
+            seed_aggregates[f"coverage@{k}"][seed] = len(recommended) / len(catalogue)
+    training_variability = {
+        label: {
+            "values": tuple(values[seed] for seed in MODEL_SEEDS),
+            "mean": float(np.mean([values[seed] for seed in MODEL_SEEDS])),
+            "std": float(np.std([values[seed] for seed in MODEL_SEEDS], ddof=0)),
+        }
+        for label, values in seed_aggregates.items()
+    }
+    return {
+        "user_ids": user_ids,
+        "per_user": per_user,
+        "coverage": coverage,
+        "seed_aggregates": seed_aggregates,
+        "training_variability": training_variability,
+    }
 
-        # Save timing report
-        overall_timing.save_report(output_path)
-        overall_timing.print_summary()
 
-        logger.info("=" * 80)
-        logger.info("Multiple runs completed successfully!")
-        logger.info("  Successful runs: %d/%d", successful_runs, args.n_runs)
-        logger.info("  Aggregated results: %s", aggregated_file)
-        logger.info("  Individual runs backup: %s", individual_runs_file)
-        logger.info("=" * 80)
+def build_precision5_inference(
+    path_signature_by_user: Mapping[object, object],
+    baselines_by_method: Mapping[str, Mapping[object, object]],
+) -> Dict[str, Dict[str, object]]:
+    """Build all five planned comparisons and apply BH exactly once."""
 
-    except Exception as e:
-        logger.error("Error aggregating results: %s", str(e))
-        logger.exception("Full traceback:")
-        overall_timing.save_report(output_path)
-        raise
-
-
-if __name__ == "__main__":
-    main()
+    if not isinstance(baselines_by_method, Mapping) or set(
+        baselines_by_method
+    ) != set(CANONICAL_BASELINE_IDS):
+        raise ValueError(
+            "Precision@5 inference requires every canonical baseline exactly once in order"
+        )
+    comparisons: Dict[str, Dict[str, object]] = {}
+    available_keys = []
+    p_values = []
+    for method_id in CANONICAL_BASELINE_IDS:
+        key = f"{PATH_SIGNATURE_METHOD_ID}_vs_{method_id}"
+        result = statistical_module.wilcoxon_aligned(
+            path_signature_by_user, baselines_by_method[method_id]
+        )
+        comparisons[key] = result
+        if result.get("status") != "available":
+            raise ValueError(
+                "Precision@5 inference requires all five planned comparisons "
+                f"to be available; {method_id} was {result.get('status')!r}"
+            )
+        available_keys.append(key)
+        p_values.append(float(result["p_value"]))
+    corrected = statistical_module.correct_p_values(p_values, method="bh")
+    for key, adjusted in zip(available_keys, corrected["p_values_adjusted"]):
+        comparisons[key]["p_value_adjusted"] = float(adjusted)
+        comparisons[key]["correction_method"] = "benjamini-hochberg"
+        comparisons[key]["family_size"] = len(CANONICAL_BASELINE_IDS)
+        comparisons[key]["family_size_planned"] = len(CANONICAL_BASELINE_IDS)
+    return comparisons

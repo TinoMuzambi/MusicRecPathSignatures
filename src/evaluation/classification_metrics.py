@@ -127,17 +127,22 @@ class ClassificationMetrics:
         y_pred: np.ndarray,
         class_names: Optional[List[str]] = None,
         save_path: Optional[str] = None,
-        title: str = "Confusion Matrix",
+        title: Optional[str] = None,
     ) -> None:
         """
         Plot confusion matrix heatmap.
+
+        This is the LaTeX-cited confusion matrix (synced to
+        ``figures/confusion_matrix.png`` by ``sync_figures.py``); its
+        caption already names and describes it, so no internal title is
+        drawn unless the caller explicitly requests one (examiner G-05).
 
         Args:
             y_true: True labels
             y_pred: Predicted labels
             class_names: Names of classes
             save_path: Path to save the plot
-            title: Plot title
+            title: Plot title. None (default) omits the internal title.
         """
         # Get unique classes that actually appear in the data
         unique_classes = np.unique(np.concatenate([y_true, y_pred]))
@@ -172,7 +177,8 @@ class ClassificationMetrics:
             linecolor="white",
             cbar_kws={"shrink": 0.8},
         )
-        plt.title(title)
+        if title:
+            plt.title(title)
         plt.ylabel("True Label")
         plt.xlabel("Predicted Label")
         plt.tight_layout()

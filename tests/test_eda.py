@@ -230,6 +230,72 @@ class TestDatasetAnalyzer(unittest.TestCase):
             self.assertTrue((output_path / "dataset_statistics.json").exists())
             self.assertTrue((output_path / "dataset_statistics_table.csv").exists())
 
+    def test_features_to_dataframe_summarises_real_array_valued_features(self):
+        """Regression test for D-15: real feature records (JSON-loaded plain
+        ``list`` values, not ``np.ndarray``) must not be silently dropped.
+        One row per track; array features become mean/std summary columns.
+        """
+
+        features = {
+            "1": {
+                "mfccs": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],  # 2 coeffs x 3 frames
+                "spectral_centroid": [100.0, 200.0, 300.0],  # 1D array
+                "duration": 30.0,  # scalar
+            },
+            "2": {
+                "mfccs": [[0.9, 1.0, 1.1], [1.2, 1.3, 1.4]],
+                "spectral_centroid": [400.0, 500.0, 600.0],
+                "duration": 45.0,
+            },
+        }
+        df = self.analyzer._features_to_dataframe(features)
+        self.assertEqual(len(df), 2)
+        self.assertIn("duration", df.columns)
+        self.assertIn("mfccs_0_mean", df.columns)
+        self.assertIn("mfccs_1_mean", df.columns)
+        self.assertIn("spectral_centroid_mean", df.columns)
+        self.assertAlmostEqual(df.iloc[0]["duration"], 30.0)
+        self.assertAlmostEqual(df.iloc[1]["duration"], 45.0)
+        self.assertAlmostEqual(df.iloc[0]["mfccs_0_mean"], 0.2)
+        self.assertAlmostEqual(df.iloc[0]["spectral_centroid_mean"], 200.0)
+
+    def test_features_to_dataframe_still_handles_pure_scalar_records(self):
+        """The old scalar-only shape must keep working after the array fix."""
+
+        df = self.analyzer._features_to_dataframe(self.sample_features)
+        self.assertEqual(len(df), 3)
+        self.assertIn("mfcc_1", df.columns)
+
+    def test_compute_feature_statistics_is_non_empty_for_array_features(self):
+        """The systemic bug meant real array-valued records always produced {}."""
+
+        features = {
+            "1": {"mfccs": [[0.1, 0.2, 0.3, 0.15], [0.4, 0.5, 0.6, 0.55]]},
+            "2": {"mfccs": [[0.9, 1.0, 1.1, 0.95], [1.2, 1.3, 1.4, 1.25]]},
+            "3": {"mfccs": [[0.2, 0.3, 0.1, 0.25], [0.5, 0.4, 0.6, 0.45]]},
+            "4": {"mfccs": [[0.15, 0.25, 0.05, 0.2], [0.45, 0.35, 0.55, 0.4]]},
+        }
+        df = self.analyzer._features_to_dataframe(features)
+        stats = self.analyzer._compute_feature_statistics(df)
+        self.assertGreater(len(stats), 0)
+        self.assertIn("mfccs_0_mean", stats)
+
+    def test_detect_outliers_reports_missing_value_percentage(self):
+        """D-15: outlier detection must also report real missingness per column."""
+
+        df = pd.DataFrame(
+            {
+                "a": [1.0, 2.0, 3.0, 4.0, None, 6.0],
+                "b": [1.0, 1.1, 0.9, 1.0, 1.05, 50.0],  # one clear outlier
+            }
+        )
+        outliers = self.analyzer._detect_outliers(df)
+        self.assertIn("missing", outliers["a"])
+        self.assertEqual(outliers["a"]["missing"]["count"], 1)
+        self.assertAlmostEqual(outliers["a"]["missing"]["percentage"], 100 / 6)
+        self.assertEqual(outliers["b"]["missing"]["count"], 0)
+        self.assertGreaterEqual(outliers["b"]["iqr_outliers"]["count"], 1)
+
 
 class TestGenreAnalyzer(unittest.TestCase):
     """Test cases for GenreAnalyzer class."""
@@ -433,6 +499,39 @@ class TestEDAReporter(unittest.TestCase):
         output_path = Path(self.temp_dir)
         self.assertTrue((output_path / "feature_distributions.png").exists())
 
+    def test_create_missing_value_outlier_summary(self):
+        """D-15: the examiner's requested missing-value/outlier illustration.
+
+        Uses array-shaped features (as real saved feature records are
+        shaped) so the fixed ``_features_to_dataframe`` path is genuinely
+        exercised, not just the scalar fallback.
+        """
+
+        features = {}
+        for i in range(1, 12):
+            record = {
+                "mfccs": [[0.1 * i, 0.2 * i, 0.3 * i], [0.4 * i, 0.5 * i, 0.6 * i]],
+                "spectral_centroid": [100.0 * i, 200.0 * i, 300.0 * i],
+            }
+            if i == 3:
+                # One track missing this feature entirely -> a real,
+                # track-level missing value in the resulting column.
+                del record["spectral_centroid"]
+            features[str(i)] = record
+        self.reporter._create_missing_value_outlier_summary(features)
+
+        output_path = Path(self.temp_dir)
+        self.assertTrue((output_path / "missing_value_outlier_summary.png").exists())
+        self.assertTrue((output_path / "missing_value_outlier_summary.csv").exists())
+
+        import pandas as _pd
+
+        table = _pd.read_csv(output_path / "missing_value_outlier_summary.csv")
+        self.assertIn("feature", table.columns)
+        self.assertIn("missing_pct", table.columns)
+        self.assertIn("outlier_pct", table.columns)
+        self.assertGreater(len(table), 0)
+
     def test_create_correlation_matrix(self):
         """Test correlation matrix plot creation."""
         self.reporter._create_correlation_matrix(self.sample_features)
@@ -554,3 +653,55 @@ class TestEDAIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHumaniseFeatureLabel:
+    """Figure 3.1's y-axis previously showed raw dataframe column names such as
+    ``multi_dimensional_series_1292_std``, which are unreadable in a printed
+    dissertation. The plot now formats them for display. The underlying CSV
+    keeps the raw identifiers, so provenance is unaffected.
+    """
+
+    def test_formats_path_series_columns(self):
+        from src.analysis.eda import humanise_feature_label
+
+        assert humanise_feature_label("multi_dimensional_series_1292_std") == (
+            "Path series 1292 (std)"
+        )
+        assert humanise_feature_label("multi_dimensional_series_18_mean") == (
+            "Path series 18 (mean)"
+        )
+
+    def test_formats_mfcc_columns(self):
+        from src.analysis.eda import humanise_feature_label
+
+        assert humanise_feature_label("mfccs_5_mean") == "MFCC 5 (mean)"
+        assert humanise_feature_label("mfccs_18_std") == "MFCC 18 (std)"
+
+    def test_formats_chroma_columns(self):
+        from src.analysis.eda import humanise_feature_label
+
+        assert humanise_feature_label("chroma_0_mean") == "Chroma 0 (mean)"
+
+    def test_formats_named_descriptor_columns(self):
+        from src.analysis.eda import humanise_feature_label
+
+        assert humanise_feature_label("zero_crossing_rate_std") == (
+            "Zero-crossing rate (std)"
+        )
+        assert humanise_feature_label("spectral_centroid_mean") == (
+            "Spectral centroid (mean)"
+        )
+
+    def test_leaves_unrecognised_labels_readable_rather_than_raw(self):
+        from src.analysis.eda import humanise_feature_label
+
+        # Fail-open on shape, but never emit a bare underscore-joined token.
+        assert "_" not in humanise_feature_label("some_unknown_column_mean")
+
+    def test_is_deterministic_and_total(self):
+        from src.analysis.eda import humanise_feature_label
+
+        for raw in ["mfccs_1_mean", "multi_dimensional_series_7_std", "tempo"]:
+            assert humanise_feature_label(raw) == humanise_feature_label(raw)
+            assert humanise_feature_label(raw).strip() != ""

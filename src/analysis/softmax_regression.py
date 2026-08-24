@@ -236,12 +236,30 @@ class SoftmaxRegression:
         - X: Path signature features of shape (n_samples, n_features)
         - y: Target category labels of shape (n_samples,) with values 0-4
         """
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y)
+        if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
+            raise ValueError("X must be a non-empty two-dimensional matrix")
+        if not np.isfinite(X).all():
+            raise ValueError("X must contain only finite values")
+        if y.ndim != 1 or y.shape[0] != X.shape[0]:
+            raise ValueError("y must be one-dimensional and aligned with X")
+        if not np.issubdtype(y.dtype, np.integer):
+            if not np.isfinite(y.astype(np.float64)).all() or not np.equal(
+                y, np.floor(y.astype(np.float64))
+            ).all():
+                raise ValueError("y must contain integer category labels")
+        y = y.astype(int)
+        if np.any(y < 0) or np.any(y >= self.n_categories):
+            raise ValueError("y contains a category outside the configured range")
+
         n_samples, n_features = X.shape
 
         # Initialise weights and bias
-        # Set random seed for reproducibility before weight initialisation
-        np.random.seed(2025)
-        self.weights = np.random.randn(n_features, self.n_categories) * 0.01
+        # Retain the established MT19937 initialisation sequence without
+        # mutating NumPy's process-global random state.
+        local_random = np.random.RandomState(2025)
+        self.weights = local_random.randn(n_features, self.n_categories) * 0.01
         self.bias = np.zeros(self.n_categories)
 
         # Convert labels to one-hot encoding
@@ -316,28 +334,29 @@ class SoftmaxRegression:
         - song_names: List of song names
         """
         if not signatures_dict:
-            logger.error("No signatures available for conversion")
-            return None, []
+            raise ValueError("signatures must be a non-empty mapping")
 
         song_names = list(signatures_dict.keys())
-        signatures = list(signatures_dict.values())
-
-        # Ensure all signatures have the same length
-        signature_lengths = [len(sig) for sig in signatures]
-        if len(set(signature_lengths)) > 1:
-            logger.warning("Signatures have different lengths: %s", signature_lengths)
-            # Pad or truncate to minimum length
-            min_length = min(signature_lengths)
-            signatures = [
-                (
-                    sig[:min_length]
-                    if len(sig) > min_length
-                    else np.pad(sig, (0, min_length - len(sig)))
+        signatures = []
+        signature_length = None
+        for song_name, raw_signature in signatures_dict.items():
+            try:
+                signature = np.asarray(raw_signature, dtype=np.float64)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"signature for {song_name} must be numeric") from error
+            if signature.ndim != 1 or signature.size == 0:
+                raise ValueError(
+                    f"signature for {song_name} must be a non-empty one-dimensional vector"
                 )
-                for sig in signatures
-            ]
+            if not np.isfinite(signature).all():
+                raise ValueError(f"signature for {song_name} must be finite")
+            if signature_length is None:
+                signature_length = int(signature.size)
+            elif signature.size != signature_length:
+                raise ValueError("all signatures must have equal length")
+            signatures.append(signature)
 
-        X = np.array(signatures)
+        X = np.stack(signatures, axis=0)
         logger.info(
             "Converted %d signatures to matrix of shape %s", len(signatures), X.shape
         )
@@ -421,7 +440,7 @@ class SoftmaxRegression:
         if X_scaled.shape[1] > 50:  # Only if we have many features
             # PCA can't have more components than samples
             max_components = min(50, X_scaled.shape[0] - 1, X_scaled.shape[1] - 1)
-            pca = PCA(n_components=max_components)
+            pca = PCA(n_components=max_components, random_state=2025)
             X_scaled = pca.fit_transform(X_scaled)
             logger.info("Applied PCA reduction to %d components", X_scaled.shape[1])
 
@@ -479,6 +498,45 @@ class SoftmaxRegression:
 
         return similarity
 
+    def _compute_enhanced_similarity_matrix(self, signatures, probabilities):
+        """Vectorise the established pairwise composite-similarity formula."""
+
+        signatures = np.asarray(signatures, dtype=np.float64)
+        probabilities = np.asarray(probabilities, dtype=np.float64)
+        if signatures.ndim != 2 or probabilities.ndim != 2:
+            raise ValueError("signatures and probabilities must be two-dimensional")
+        if signatures.shape[0] != probabilities.shape[0] or signatures.shape[0] == 0:
+            raise ValueError("signatures and probabilities must have aligned rows")
+        if not np.isfinite(signatures).all() or not np.isfinite(probabilities).all():
+            raise ValueError("signatures and probabilities must be finite")
+
+        signature_dot = signatures @ signatures.T
+        signature_norm = np.linalg.norm(signatures, axis=1)
+        signature_cosine = signature_dot / (
+            np.outer(signature_norm, signature_norm) + 1e-8
+        )
+        signature_component = np.square(signature_cosine)
+
+        probability_dot = probabilities @ probabilities.T
+        probability_norm = np.linalg.norm(probabilities, axis=1)
+        probability_component = probability_dot / (
+            np.outer(probability_norm, probability_norm) + 1e-8
+        )
+        categories = np.argmax(probabilities, axis=1)
+        category_component = (categories[:, None] == categories[None, :]).astype(
+            np.float64
+        )
+
+        similarity = (
+            self.similarity_weights[0] * signature_component
+            + self.similarity_weights[1] * probability_component
+            + self.similarity_weights[2] * category_component
+        )
+        np.fill_diagonal(similarity, 1.0)
+        if not np.isfinite(similarity).all():
+            raise ValueError("composite similarity must be finite")
+        return similarity
+
     def _apply_temperature_scaling(self, similarity_matrix, temperature):
         """
         Apply improved temperature scaling to make differences more pronounced.
@@ -499,11 +557,23 @@ class SoftmaxRegression:
         parameters to control the contrast enhancement. Higher steepness values create
         sharper transitions between similar and dissimilar items.
         """
-        if temperature == 1.0:
-            return similarity_matrix
+        if (
+            isinstance(temperature, bool)
+            or not np.isscalar(temperature)
+            or not np.isfinite(float(temperature))
+            or float(temperature) <= 0.0
+        ):
+            raise ValueError("temperature must be a positive finite number")
+        similarity_matrix = np.asarray(similarity_matrix, dtype=np.float64)
+        if similarity_matrix.ndim != 2 or not np.isfinite(similarity_matrix).all():
+            raise ValueError("similarity_matrix must be a finite two-dimensional array")
+        if np.any(similarity_matrix < 0.0):
+            raise ValueError("temperature scaling requires non-negative similarities")
+        if float(temperature) == 1.0:
+            return similarity_matrix.copy()
 
         # Use inverse temperature to make differences more pronounced
-        scaled_matrix = np.power(similarity_matrix, 1 / temperature)
+        scaled_matrix = np.power(similarity_matrix, 1 / float(temperature))
 
         # Apply sigmoid-like transformation for better contrast
         scaled_matrix = 1 / (
@@ -536,13 +606,10 @@ class SoftmaxRegression:
         - song_names: List of song names
         """
         if not signatures_dict:
-            logger.error("No signatures available for similarity computation")
-            return np.array([]), []
+            raise ValueError("signatures must be a non-empty mapping")
 
         # Step 1: Convert signatures to matrix format
         X, song_names = self._convert_signatures_to_matrix(signatures_dict)
-        if X is None:
-            return np.array([]), []
 
         n_songs = len(song_names)
 
@@ -562,16 +629,9 @@ class SoftmaxRegression:
         )
 
         # Step 5: Compute enhanced similarity matrix
-        similarity_matrix = np.zeros((n_songs, n_songs))
-
-        for i in range(n_songs):
-            for j in range(n_songs):
-                if i == j:
-                    similarity_matrix[i, j] = 1.0
-                else:
-                    similarity_matrix[i, j] = self._compute_enhanced_similarity(
-                        X[i], X[j], category_probs[i], category_probs[j]
-                    )
+        similarity_matrix = self._compute_enhanced_similarity_matrix(
+            X, category_probs
+        )
 
         # Step 6: Apply temperature scaling
         similarity_matrix = self._apply_temperature_scaling(

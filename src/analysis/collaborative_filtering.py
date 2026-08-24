@@ -6,7 +6,21 @@ This module implements collaborative filtering using modern recommendation libra
 for reliable, industry-standard baseline methods.
 """
 
+from collections.abc import Callable, Iterable, Mapping
+from numbers import Integral
 from typing import Dict, List, Tuple
+
+from .baseline_contract import (
+    IMPLICIT_ALS_CONFIG,
+    LIGHTFM_SEEDS,
+    BaselineFailure,
+    BinaryInteractionData,
+    build_binary_interaction_matrix,
+    rank_scores,
+    normalise_als_configuration,
+    validate_collaborative_request,
+)
+
 import os
 import numpy as np
 
@@ -16,6 +30,8 @@ try:
 
     LIGHTFM_AVAILABLE = True
 except Exception:
+    LightFM = None
+    Dataset = None
     LIGHTFM_AVAILABLE = False
 
 try:
@@ -23,6 +39,7 @@ try:
 
     IMPLICIT_AVAILABLE = True
 except Exception:
+    implicit = None
     IMPLICIT_AVAILABLE = False
 from sklearn.preprocessing import StandardScaler
 from scipy.sparse import csr_matrix
@@ -45,11 +62,175 @@ if IMPLICIT_AVAILABLE:
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 
-def create_synthetic_ratings(
+def _canonical_implicit_factory() -> Callable[..., object]:
+    if not IMPLICIT_AVAILABLE or implicit is None:
+        raise BaselineFailure(
+            "implicit_als",
+            "dependency",
+            "dependency_unavailable",
+            "Implicit 0.7.0 is required for the canonical adapter",
+        )
+    return implicit.als.AlternatingLeastSquares
+
+
+class ImplicitALSRecommender:
+    """Canonical unweighted Implicit ALS over a user-by-item binary matrix."""
+
+    canonical_method_id = "implicit_als"
+
+    def __init__(
+        self,
+        *,
+        random_state: int,
+        model_factory: Callable[..., object] | None = None,
+        configuration: Mapping[str, object] | None = None,
+    ) -> None:
+        if (
+            isinstance(random_state, bool)
+            or not isinstance(random_state, Integral)
+            or int(random_state) not in LIGHTFM_SEEDS
+        ):
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "configuration",
+                "invalid_seed",
+                f"seed must be one of {LIGHTFM_SEEDS}",
+            )
+        self.random_state = int(random_state)
+        self._model_factory = model_factory
+        self.configuration = normalise_als_configuration(configuration)
+        self.data: BinaryInteractionData | None = None
+        self.model = None
+
+    def fit(
+        self,
+        interactions: Mapping[object, Mapping[object, object]],
+        *,
+        catalogue_ids: Iterable[object],
+    ) -> "ImplicitALSRecommender":
+        self.data = build_binary_interaction_matrix(
+            interactions, catalogue_ids=catalogue_ids
+        )
+        factory = self._model_factory
+        if factory is None:
+            factory = _canonical_implicit_factory()
+        constructor = {
+            **IMPLICIT_ALS_CONFIG,
+            **dict(self.configuration),
+            "random_state": self.random_state,
+        }
+        try:
+            self.model = factory(**constructor)
+        except BaselineFailure:
+            raise
+        except Exception as exc:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "fit",
+                "fit_failed",
+                f"Implicit ALS construction failed: {exc}",
+            ) from exc
+        if getattr(self.model, "cg_steps", None) != 3:
+            self.model = None
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "fit",
+                "configuration_mismatch",
+                "Implicit ALS must expose cg_steps=3",
+            )
+        try:
+            self.model.fit(self.data.matrix, show_progress=False)
+        except Exception as exc:
+            self.model = None
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "fit",
+                "fit_failed",
+                f"Implicit ALS fit failed: {exc}",
+            ) from exc
+        try:
+            user_factors = np.asarray(self.model.user_factors)
+            item_factors = np.asarray(self.model.item_factors)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "fit",
+                "factor_shape",
+                "Implicit ALS did not expose numeric factor arrays",
+            ) from exc
+        expected_user_shape = (len(self.data.user_ids), int(self.configuration["factors"]))
+        expected_item_shape = (len(self.data.item_ids), int(self.configuration["factors"]))
+        if (
+            user_factors.shape != expected_user_shape
+            or item_factors.shape != expected_item_shape
+            or not np.isfinite(user_factors).all()
+            or not np.isfinite(item_factors).all()
+        ):
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "fit",
+                "factor_shape",
+                "Implicit ALS factor shapes or values violate the fixed contract",
+            )
+        return self
+
+    def score(
+        self, user_id: object, candidate_ids: Iterable[object]
+    ) -> tuple[tuple[str, float], ...]:
+        if self.data is None or self.model is None:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "score",
+                "not_fitted",
+                "fit must complete before scoring",
+            )
+        canonical_user, candidates, item_indices = validate_collaborative_request(
+            self.data,
+            user_id,
+            candidate_ids,
+            method_id=self.canonical_method_id,
+        )
+        try:
+            user_vector = np.asarray(
+                self.model.user_factors[self.data.user_map[canonical_user]],
+                dtype=np.float64,
+            )
+            item_vectors = np.asarray(
+                self.model.item_factors[item_indices], dtype=np.float64
+            )
+            scores = item_vectors @ user_vector
+        except Exception as exc:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "predict",
+                "predict_failed",
+                f"Implicit ALS factor scoring failed: {exc}",
+            ) from exc
+        if scores.ndim != 1 or scores.shape[0] != len(candidates):
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "predict",
+                "score_length",
+                "Implicit ALS returned a score vector with the wrong length",
+            )
+        if not np.isfinite(scores).all():
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "predict",
+                "non_finite_score",
+                "Implicit ALS returned a non-finite score",
+            )
+        return rank_scores(candidates, scores)
+
+
+def create_legacy_feature_fallback_ratings(
     features_dict: Dict[str, Dict], n_users: int = 50
 ) -> Dict[str, Dict[str, float]]:
     """
-    Create synthetic user ratings based on feature similarity.
+    Retain the invalid feature/fallback ratings helper for legacy diagnostics.
+
+    This helper is not part of the canonical synthetic-user task. It preserves
+    the old baseline body's behaviour only until that legacy runner is retired.
 
     Args:
         features_dict: Dictionary of song features

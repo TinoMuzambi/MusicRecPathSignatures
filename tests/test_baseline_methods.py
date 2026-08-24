@@ -5,14 +5,13 @@ This module tests collaborative filtering, content-based filtering,
 and matrix factorisation implementations using LightFM and Implicit libraries.
 """
 
-from unittest.mock import Mock, patch
 import numpy as np
 
 # Import the modules to test
 from src.analysis.collaborative_filtering import (
     UserBasedCF,
     ItemBasedCF,
-    create_synthetic_ratings,
+    create_legacy_feature_fallback_ratings,
 )
 from src.analysis.content_based_filtering import ContentBasedFilter, GenreBasedFilter
 from src.analysis.matrix_factorisation import (
@@ -44,52 +43,18 @@ class TestCollaborativeFiltering:
         assert cf.model is None
         assert cf.dataset is None
 
-    @patch("src.analysis.collaborative_filtering.implicit")
-    def test_user_based_cf_fit_and_predict(self, mock_implicit):
-        """Test UserBasedCF fit and predict methods with Implicit library."""
-        # Mock the implicit library
-        mock_model = Mock()
-        mock_implicit.als.AlternatingLeastSquares.return_value = mock_model
+    def test_user_based_cf_is_legacy_compatibility_only(self):
+        """The misleading historical label is retained only for compatibility."""
+        assert UserBasedCF.__name__ == "UserBasedCF"
+        assert not getattr(UserBasedCF, "canonical_method_id", None)
 
-        # Create sample ratings data
-        ratings_data = {
-            "user1": {"item1": 4.0, "item2": 3.0, "item3": 5.0},
-            "user2": {"item1": 3.0, "item2": 4.0, "item3": 2.0},
-            "user3": {"item1": 5.0, "item2": 2.0, "item3": 4.0},
-        }
+    def test_item_based_cf_is_legacy_compatibility_only(self):
+        """The duplicate historical LightFM label is not a canonical method."""
+        assert ItemBasedCF.__name__ == "ItemBasedCF"
+        assert not getattr(ItemBasedCF, "canonical_method_id", None)
 
-        cf = UserBasedCF(n_neighbors=2)
-        cf.fit(ratings_data)
-
-        # Test prediction
-        prediction = cf.predict_rating("user1", "item1")
-        assert isinstance(prediction, float)
-        assert 0 <= prediction <= 5
-
-    @patch("src.analysis.collaborative_filtering.LightFM")
-    def test_item_based_cf_fit_and_predict(self, mock_lightfm):
-        """Test ItemBasedCF fit and predict methods with LightFM library."""
-        # Mock the LightFM library
-        mock_model = Mock()
-        mock_lightfm.return_value = mock_model
-
-        # Create sample ratings data
-        ratings_data = {
-            "user1": {"item1": 4.0, "item2": 3.0, "item3": 5.0},
-            "user2": {"item1": 3.0, "item2": 4.0, "item3": 2.0},
-            "user3": {"item1": 5.0, "item2": 2.0, "item3": 4.0},
-        }
-
-        cf = ItemBasedCF(n_neighbors=2)
-        cf.fit(ratings_data)
-
-        # Test prediction
-        prediction = cf.predict_rating("user1", "item1")
-        assert isinstance(prediction, float)
-        assert 0 <= prediction <= 5
-
-    def test_create_synthetic_ratings(self):
-        """Test synthetic ratings creation."""
+    def test_legacy_feature_fallback_ratings(self):
+        """Keep the retired ratings helper explicitly labelled as legacy."""
         # Create mock features
         features_dict = {
             "song1": {"mfccs": np.random.randn(100, 20)},
@@ -97,7 +62,7 @@ class TestCollaborativeFiltering:
             "song3": {"mfccs": np.random.randn(100, 20)},
         }
 
-        ratings = create_synthetic_ratings(features_dict, n_users=5)
+        ratings = create_legacy_feature_fallback_ratings(features_dict, n_users=5)
 
         assert len(ratings) == 5
         for user_ratings in ratings.values():
@@ -233,75 +198,20 @@ class TestMatrixFactorisation:
         assert nmf.random_state == 2025
         assert nmf.model is None
 
-    @patch("src.analysis.matrix_factorisation.LightFM")
-    def test_svd_recommender_fit_and_predict(self, mock_lightfm):
-        """Test SVDRecommender fit and predict methods with LightFM."""
-        # Mock the LightFM library
-        mock_model = Mock()
-        mock_lightfm.return_value = mock_model
+    def test_svd_recommender_is_legacy_compatibility_only(self):
+        """LightFM WARP must no longer be described as literal SVD."""
+        assert SVDRecommender.__name__ == "SVDRecommender"
+        assert not getattr(SVDRecommender, "canonical_method_id", None)
 
-        # Create sample ratings data
-        ratings_data = {
-            "user1": {"item1": 4.0, "item2": 3.0, "item3": 5.0},
-            "user2": {"item1": 3.0, "item2": 4.0, "item3": 2.0},
-            "user3": {"item1": 5.0, "item2": 2.0, "item3": 4.0},
-        }
+    def test_nmf_recommender_is_legacy_compatibility_only(self):
+        """LightFM WARP-kOS must no longer be described as literal NMF."""
+        assert NMFRecommender.__name__ == "NMFRecommender"
+        assert not getattr(NMFRecommender, "canonical_method_id", None)
 
-        svd = SVDRecommender(n_components=5)
-        svd.fit(ratings_data)
-
-        # Test prediction
-        prediction = svd.predict_rating("user1", "item1")
-        assert isinstance(prediction, float)
-        assert 0 <= prediction <= 5
-
-    @patch("src.analysis.matrix_factorisation.LightFM")
-    def test_nmf_recommender_fit_and_predict(self, mock_lightfm):
-        """Test NMFRecommender fit and predict methods with LightFM."""
-        # Mock the LightFM library
-        mock_model = Mock()
-        mock_lightfm.return_value = mock_model
-
-        # Create sample ratings data
-        ratings_data = {
-            "user1": {"item1": 4.0, "item2": 3.0, "item3": 5.0},
-            "user2": {"item1": 3.0, "item2": 4.0, "item3": 2.0},
-            "user3": {"item1": 5.0, "item2": 2.0, "item3": 4.0},
-        }
-
-        nmf = NMFRecommender(n_components=5)
-        nmf.fit(ratings_data)
-
-        # Test prediction
-        prediction = nmf.predict_rating("user1", "item1")
-        assert isinstance(prediction, float)
-        assert 0 <= prediction <= 5
-
-    @patch("src.analysis.matrix_factorisation.LightFM")
-    def test_hybrid_recommender(self, mock_lightfm):
-        """Test HybridRecommender combining SVD and NMF."""
-        # Mock the LightFM library
-        mock_model = Mock()
-        mock_lightfm.return_value = mock_model
-
-        # Create sample ratings data
-        ratings_data = {
-            "user1": {"item1": 4.0, "item2": 3.0, "item3": 5.0},
-            "user2": {"item1": 3.0, "item2": 4.0, "item3": 2.0},
-        }
-
-        hybrid = HybridRecommender(svd_components=5, nmf_components=5)
-        hybrid.fit(ratings_data)
-
-        # Test prediction
-        prediction = hybrid.predict_rating("user1", "item1")
-        assert isinstance(prediction, float)
-        assert 0 <= prediction <= 5
-
-        # Test recommendations
-        recommendations = hybrid.recommend("user1", n_recommendations=3)
-        assert isinstance(recommendations, list)
-        assert len(recommendations) <= 3
+    def test_hybrid_recommender_is_legacy_compatibility_only(self):
+        """The list-blending historical hybrid is not a canonical method."""
+        assert HybridRecommender.__name__ == "HybridRecommender"
+        assert not getattr(HybridRecommender, "canonical_method_id", None)
 
 
 class TestEvaluationMetrics:

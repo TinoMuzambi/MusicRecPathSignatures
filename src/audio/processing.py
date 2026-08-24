@@ -1,375 +1,596 @@
-# pylint: disable=broad-except
-# pylint: disable=invalid-name
-"""
-Audio processing utilities for music recommendation system.
+"""Fail-closed audio processing for the canonical 38-channel signature path."""
 
-This module provides safe audio processing functions including file validation,
-feature extraction, and multi-dimensional time series creation. It includes
-robust error handling to prevent segmentation faults and handle edge cases
-in audio processing.
-"""
-
+from dataclasses import dataclass
 import os
+from typing import Any, Dict, Mapping
+
 import librosa
 import numpy as np
+
+from ..evaluation.experiment_protocol import ProtocolError, normalise_id
 from ..utils.logger_config import setup_logger
 
-# Set up logger
+
 logger = setup_logger("audio_processing")
 
-# Configuration
-MAX_AUDIO_DURATION = 300  # 5 minutes
-MIN_AUDIO_DURATION = 0.1  # 0.1 seconds
+MAX_AUDIO_DURATION = 300
+MIN_AUDIO_DURATION = 0.1
+FRAME_LENGTH = 2048
+HOP_LENGTH = 512
+MAX_PATH_POINTS = 10000
+STANDARDISED_CLIP_LIMIT = 5.0
+AUDIO_REPRESENTATION_VERSION = "aligned_chroma_yin_zscore_v2"
+CHROMA_CHANNEL_COUNT = 12
+SIGNATURE_CHANNELS = (
+    "time",
+    "pitch",
+    "loudness",
+    *(f"mfcc_{index:02d}" for index in range(1, 21)),
+    *(f"chroma_{index:02d}" for index in range(1, CHROMA_CHANNEL_COUNT + 1)),
+    "spectral_centroid",
+    "spectral_bandwidth",
+    "zero_crossing_rate",
+)
+
+# Channel subset used by the executed retuned comparison. The canonical
+# signature computation slices to this subset before signing;
+# chroma and zero-crossing-rate are extracted and remain available for the
+# traditional-audio baseline and EDA, but do not enter the signature path.
+CANONICAL_SIGNATURE_CHANNELS = (
+    "time",
+    "pitch",
+    "loudness",
+    *(f"mfcc_{index:02d}" for index in range(1, 21)),
+    "spectral_centroid",
+    "spectral_bandwidth",
+)
 
 
-def validate_audio_file(file_path):
+def select_signature_channels(
+    series: np.ndarray, channel_names=CANONICAL_SIGNATURE_CHANNELS
+) -> np.ndarray:
+    """Slice a full 38-channel path to a named channel subset, columns first.
+
+    ``series`` must be a 2-D array whose columns are in ``SIGNATURE_CHANNELS``
+    order (the layout ``create_multidimensional_timeseries`` produces). Raises
+    if any requested channel name is unknown or if ``series`` does not have
+    exactly ``len(SIGNATURE_CHANNELS)`` columns, so a mismatched or already
+    sliced input fails closed rather than silently slicing the wrong columns.
     """
-    Validate if an audio file is worth processing.
 
-    Parameters:
-    - file_path: Path to the audio file
+    array = np.asarray(series)
+    if array.ndim != 2 or array.shape[1] != len(SIGNATURE_CHANNELS):
+        raise ValueError(
+            f"series must have {len(SIGNATURE_CHANNELS)} columns in "
+            "SIGNATURE_CHANNELS order"
+        )
+    channel_index = {name: index for index, name in enumerate(SIGNATURE_CHANNELS)}
+    unknown = [name for name in channel_names if name not in channel_index]
+    if unknown:
+        raise ValueError(f"unknown signature channel(s): {unknown}")
+    indices = [channel_index[name] for name in channel_names]
+    return array[:, indices]
 
-    Returns:
-    - bool: True if file should be processed, False otherwise
-    """
+
+def _canonical_track_id(track_id: object) -> str:
     try:
-        # Check if file exists and has reasonable size
-        if not os.path.exists(file_path):
-            logger.warning("File does not exist: %s", file_path)
-            return False
+        return normalise_id(track_id, kind="track")
+    except ProtocolError as exc:
+        raise ValueError(str(exc)) from exc
 
+
+@dataclass(frozen=True)
+class TrackProcessingError(ValueError):
+    """One deterministic, serialisable track-processing failure."""
+
+    track_id: str
+    stage: str
+    reason_code: str
+    reason: str
+
+    def __init__(
+        self, track_id: object, stage: str, reason_code: str, reason: str
+    ) -> None:
+        canonical_id = _canonical_track_id(track_id)
+        object.__setattr__(self, "track_id", canonical_id)
+        object.__setattr__(self, "stage", str(stage))
+        object.__setattr__(self, "reason_code", str(reason_code))
+        object.__setattr__(self, "reason", str(reason))
+        ValueError.__init__(self, f"{canonical_id}: {stage}/{reason_code}: {reason}")
+
+    def to_record(self) -> Dict[str, Any]:
+        """Return the stable JSON-compatible failure record."""
+
+        return {
+            "schema_version": 1,
+            "track_id": self.track_id,
+            "stage": self.stage,
+            "reason_code": self.reason_code,
+            "reason": self.reason,
+        }
+
+
+def _failure(
+    track_id: object, stage: str, reason_code: str, reason: str
+) -> TrackProcessingError:
+    return TrackProcessingError(track_id, stage, reason_code, reason)
+
+
+def _finite_array(
+    value: object,
+    *,
+    track_id: object,
+    field: str,
+    ndim: int,
+    stage: str = "feature_extraction",
+) -> np.ndarray:
+    try:
+        array = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise _failure(
+            track_id, stage, "invalid_feature", f"{field} must be numeric"
+        ) from exc
+    if array.ndim != ndim:
+        raise _failure(
+            track_id,
+            stage,
+            "feature_orientation",
+            f"{field} must be {ndim}-dimensional",
+        )
+    if array.size == 0 or any(size == 0 for size in array.shape):
+        raise _failure(track_id, stage, "empty_feature", f"{field} must not be empty")
+    if not np.isfinite(array).all():
+        raise _failure(
+            track_id,
+            stage,
+            "non_finite_feature",
+            f"{field} contains a non-finite value",
+        )
+    return array
+
+
+def validate_audio_file(file_path: str | os.PathLike) -> bool:
+    """Return whether a path passes inexpensive canonical audio admission checks."""
+
+    try:
+        if not os.path.isfile(file_path):
+            return False
         file_size = os.path.getsize(file_path)
-        if file_size < 1024:  # Less than 1KB
-            logger.warning("File too small (%d bytes): %s", file_size, file_path)
+        if file_size < 1024 or file_size > 100 * 1024 * 1024:
             return False
-
-        if file_size > 100 * 1024 * 1024:  # More than 100MB
-            logger.warning(
-                "File too large (%.1fMB): %s", file_size / (1024 * 1024), file_path
-            )
-            return False
-
-        # Try to get basic info without loading full audio
-        y_info = librosa.get_duration(path=file_path)
-        if y_info < MIN_AUDIO_DURATION:
-            logger.warning("Audio too short (%.2fs): %s", y_info, file_path)
-            return False
-
-        if y_info > MAX_AUDIO_DURATION:
-            logger.warning(
-                "Audio too long (%.2fs), will truncate: %s", y_info, file_path
-            )
-
-        return True
-
-    except Exception as e:
-        logger.error("Error validating audio file %s: %s", file_path, e)
+        duration = float(librosa.get_duration(path=file_path))
+        return np.isfinite(duration) and duration >= MIN_AUDIO_DURATION
+    except Exception:  # decoder backends expose several unrelated exception types
         return False
 
 
-def extract_pitch_simple(y, sr):
-    """
-    Extract a simple pitch estimate using FFT analysis.
-    This is a safe method that doesn't use problematic librosa pitch extraction.
+def load_audio(
+    file_path: str | os.PathLike, *, track_id: object | None = None
+):
+    """Load one audio file at 22.05 kHz or raise a structured failure."""
 
-    Parameters:
-    - y: Audio time series
-    - sr: Sampling rate
+    canonical_id = _canonical_track_id(file_path if track_id is None else track_id)
+    if not isinstance(file_path, (str, os.PathLike)):
+        raise _failure(
+            canonical_id,
+            "audio_load",
+            "invalid_audio_path",
+            "audio path must be a string or path-like object",
+        )
+    if not validate_audio_file(file_path):
+        raise _failure(
+            canonical_id,
+            "audio_load",
+            "invalid_audio",
+            "audio file failed existence, size, duration, or decode validation",
+        )
+    try:
+        audio, sample_rate = librosa.load(
+            file_path, sr=22050, duration=MAX_AUDIO_DURATION
+        )
+    except Exception as exc:  # library exceptions vary by decoder
+        raise _failure(
+            canonical_id,
+            "audio_load",
+            "unreadable_audio",
+            "audio file could not be decoded",
+        ) from exc
 
-    Returns:
-    - pitch: Pitch array (simplified)
-    - magnitudes: Magnitude array
-    """
-    logger.debug("Using simple FFT-based pitch extraction")
+    audio = _finite_array(
+        audio,
+        track_id=canonical_id,
+        field="audio",
+        ndim=1,
+        stage="audio_load",
+    )
+    if not isinstance(sample_rate, (int, np.integer)) or int(sample_rate) <= 0:
+        raise _failure(
+            canonical_id,
+            "audio_load",
+            "invalid_sample_rate",
+            "decoded sample rate must be a positive integer",
+        )
+    if np.max(np.abs(audio)) < 1e-6:
+        raise _failure(
+            canonical_id,
+            "audio_load",
+            "silent_audio",
+            "audio amplitude is below the silence threshold",
+        )
+    return audio, int(sample_rate)
 
-    # Use a simple approach: compute spectrogram and find dominant frequencies
-    hop_length = 1024
-    frame_length = min(2048, len(y))  # Ensure frame_length doesn't exceed signal length
 
-    # Compute spectrogram
-    D = librosa.stft(y, hop_length=hop_length, n_fft=frame_length)
-    magnitudes = np.abs(D)
+def extract_pitch_simple(y, sr, *, track_id: object = "unknown"):
+    """Extract one framewise YIN fundamental-frequency estimate per frame."""
 
-    # Find dominant frequency for each frame
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=frame_length)
+    audio = _finite_array(y, track_id=track_id, field="audio", ndim=1)
+    if not isinstance(sr, (int, np.integer)) or int(sr) <= 0:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "invalid_sample_rate",
+            "sample rate must be a positive integer",
+        )
+    frame_length = min(FRAME_LENGTH, len(audio))
+    try:
+        spectrum = librosa.stft(
+            audio,
+            hop_length=HOP_LENGTH,
+            n_fft=frame_length,
+            center=True,
+        )
+        magnitudes = np.abs(spectrum)
+        pitch = librosa.yin(
+            audio,
+            fmin=float(librosa.note_to_hz("C1")),
+            fmax=float(librosa.note_to_hz("C8")),
+            sr=int(sr),
+            frame_length=frame_length,
+            hop_length=HOP_LENGTH,
+            center=True,
+        )
+    except Exception as exc:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "pitch_extraction",
+            "pitch extraction failed",
+        ) from exc
 
-    # Create a simple pitch estimate (dominant frequency per frame)
-    pitch = np.zeros_like(magnitudes)
-    for i in range(magnitudes.shape[1]):
-        if np.max(magnitudes[:, i]) > 0:
-            # Find the frequency with maximum magnitude
-            max_idx = np.argmax(magnitudes[:, i])
-            pitch[max_idx, i] = freqs[max_idx]
-
+    pitch = _finite_array(pitch, track_id=track_id, field="pitch", ndim=1)
+    if pitch.shape[0] != magnitudes.shape[1] or np.any(pitch <= 0.0):
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "inconsistent_frames",
+            "pitch must contain one positive value per analysis frame",
+        )
     return pitch, magnitudes
 
 
-def extract_loudness_safe(y):
-    """
-    Extract loudness using safe RMS calculation.
+def extract_loudness_safe(y, *, track_id: object = "unknown"):
+    """Extract RMS loudness without substituting fallback values."""
 
-    Parameters:
-    - y: Audio time series
-
-    Returns:
-    - loudness: RMS values
-    """
+    audio = _finite_array(y, track_id=track_id, field="audio", ndim=1)
+    frame_length = min(FRAME_LENGTH, len(audio))
     try:
-        hop_length = 512
-        frame_length = min(
-            1024, len(y)
-        )  # Ensure frame_length doesn't exceed signal length
+        loudness = librosa.feature.rms(
+            y=audio,
+            frame_length=frame_length,
+            hop_length=HOP_LENGTH,
+            center=True,
+        )[0]
+    except Exception as exc:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "loudness_extraction",
+            "loudness extraction failed",
+        ) from exc
+    return _finite_array(
+        loudness, track_id=track_id, field="loudness", ndim=1
+    )
 
-        if len(y) < frame_length:
-            # For very short signals, return a single RMS value
-            return np.array([np.sqrt(np.mean(y**2))])
 
-        frames = librosa.util.frame(y, frame_length=frame_length, hop_length=hop_length)
-        loudness = np.sqrt(np.mean(frames**2, axis=0))
-        return loudness
-    except Exception as e:
-        logger.warning("Loudness extraction failed: %s", e)
-        return np.array([0.1] * (len(y) // 512 + 1))
+def extract_mfccs_safe(y, sr, *, track_id: object = "unknown"):
+    """Extract the evidenced 20 MFCC channels without dummy data."""
 
-
-def extract_mfccs_safe(y, sr):
-    """
-    Extract MFCCs with error handling.
-
-    Parameters:
-    - y: Audio time series
-    - sr: Sampling rate
-
-    Returns:
-    - mfccs: MFCC features
-    """
+    audio = _finite_array(y, track_id=track_id, field="audio", ndim=1)
     try:
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20, hop_length=512)
-        return mfccs
-    except Exception as e:
-        logger.warning("MFCC extraction failed: %s", e)
-        # Create dummy MFCCs
-        n_frames = max(1, len(y) // 512 + 1)
-        mfccs = np.random.normal(0, 1, (20, n_frames))
-        return mfccs
+        mfccs = librosa.feature.mfcc(
+            y=audio,
+            sr=int(sr),
+            n_mfcc=20,
+            n_fft=min(FRAME_LENGTH, len(audio)),
+            hop_length=HOP_LENGTH,
+            center=True,
+        )
+    except Exception as exc:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "mfcc_extraction",
+            "MFCC extraction failed",
+        ) from exc
+    mfccs = _finite_array(mfccs, track_id=track_id, field="mfccs", ndim=2)
+    if mfccs.shape[0] != 20:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "feature_orientation",
+            "MFCCs must have 20 channel rows",
+        )
+    return mfccs
 
 
-def extract_features(y, sr):
-    """
-    Extract features from the audio time series using safe methods.
-    This version avoids segmentation faults by using only basic operations.
+def extract_features(y, sr, *, track_id: object = "unknown"):
+    """Extract pitch, loudness, and 20 MFCCs from accepted audio."""
 
-    Parameters:
-    - y: Audio time series.
-    - sr: Sampling rate.
-
-    Returns:
-    - pitch: Pitch of the audio (simplified).
-    - loudness: Loudness of the audio.
-    - mfccs: Mel-frequency cepstral coefficients (MFCCs).
-    """
-    logger.debug("Extracting features using safe methods")
-    logger.debug("Audio length: %d", len(y))
-    logger.debug("Sampling rate: %d", sr)
-
-    # Extract pitch using simple FFT method
-    logger.debug("Extracting pitch with simple FFT method")
-    pitch, magnitudes = extract_pitch_simple(y, sr)
-    logger.debug("Pitch shape: %s", pitch.shape)
-    logger.debug("Pitch magnitudes shape: %s", magnitudes.shape)
-
-    # Extract loudness using safe RMS
-    logger.debug("Extracting loudness")
-    loudness = extract_loudness_safe(y)
-    logger.debug("Loudness shape: %s", loudness.shape)
-
-    # Extract MFCCs with error handling
-    logger.debug("Extracting MFCCs")
-    mfccs = extract_mfccs_safe(y, sr)
-    logger.debug("MFCCs shape: %s", mfccs.shape)
-
-    # Validate the features
-    if np.any(np.isnan(pitch)):
-        logger.warning("NaN values found in pitch")
-        pitch = np.nan_to_num(pitch, nan=0.0)
-
-    if np.any(np.isnan(loudness)):
-        logger.warning("NaN values found in loudness")
-        loudness = np.nan_to_num(loudness, nan=0.0)
-
-    if np.any(np.isnan(mfccs)):
-        logger.warning("NaN values found in MFCCs")
-        mfccs = np.nan_to_num(mfccs, nan=0.0)
-
-    logger.debug("Feature extraction complete")
+    audio = _finite_array(y, track_id=track_id, field="audio", ndim=1)
+    if np.max(np.abs(audio)) < 1e-6:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "silent_audio",
+            "audio amplitude is below the silence threshold",
+        )
+    pitch, _ = extract_pitch_simple(audio, sr, track_id=track_id)
+    loudness = extract_loudness_safe(audio, track_id=track_id)
+    mfccs = extract_mfccs_safe(audio, sr, track_id=track_id)
     return pitch, loudness, mfccs
 
 
-def load_audio(file_path):
+def validate_signature_path(
+    path, *, track_id: object, order: int = 2, expected_channels: int | None = None
+) -> np.ndarray:
+    """Validate, but never reshape or repair, an ordered canonical-channel path.
+
+    ``expected_channels`` defaults to the full 38-channel path; pass the
+    length of a named channel subset (e.g. ``CANONICAL_SIGNATURE_CHANNELS``)
+    when the path has already been sliced to fewer columns, so a wrong-shaped
+    input still fails closed rather than silently signing the wrong channels.
     """
-    Load an audio file using Librosa.
 
-    Parameters:
-    - file_path: Path to the audio file.
-
-    Returns:
-    - y: Audio time series.
-    - sr: Sampling rate.
-    """
-    logger.debug("Loading audio file: %s", file_path)
-
-    # Validate file first
-    if not validate_audio_file(file_path):
-        logger.warning("Skipping invalid file: %s", file_path)
-        # Return a dummy audio signal
-        y = np.random.normal(0, 0.01, 22050)  # 1 second of noise
-        sr = 22050
-        return y, sr
-
+    canonical_id = _canonical_track_id(track_id)
+    channel_count = (
+        len(SIGNATURE_CHANNELS) if expected_channels is None else int(expected_channels)
+    )
     try:
-        # First load with original sampling rate to get duration
-        y_orig, sr_orig = librosa.load(file_path, sr=None)
-        logger.debug("Original sampling rate: %d", sr_orig)
-        logger.debug("Original audio length: %d", len(y_orig))
-        duration = len(y_orig) / sr_orig
-        logger.debug("Duration: %.2f seconds", duration)
-
-        # Check if file is too long
-        if duration > MAX_AUDIO_DURATION:
-            logger.warning(
-                "Audio file is too long (%.2fs), truncating to first %d seconds",
-                duration,
-                MAX_AUDIO_DURATION,
-            )
-            max_samples = int(MAX_AUDIO_DURATION * sr_orig)
-            y_orig = y_orig[:max_samples]
-            duration = MAX_AUDIO_DURATION
-
-        # Now load with target sampling rate
-        target_sr = 22050  # Target sampling rate
-        y, sr = librosa.load(
-            file_path, sr=target_sr, duration=min(duration, MAX_AUDIO_DURATION)
+        array = np.asarray(path, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise _failure(
+            canonical_id,
+            "signature_path",
+            "invalid_path",
+            "signature path must be numeric",
+        ) from exc
+    if array.ndim != 2:
+        raise _failure(
+            canonical_id,
+            "signature_path",
+            "path_orientation",
+            f"signature path must have shape (n_frames, {channel_count})",
         )
-        logger.debug("New sampling rate: %d", sr)
-        logger.debug("New audio length: %d", len(y))
-        logger.debug("New duration: %.2f seconds", len(y) / sr)
+    if array.shape[0] == channel_count and array.shape[1] != channel_count:
+        raise _failure(
+            canonical_id,
+            "signature_path",
+            "path_orientation",
+            "signature path appears transposed; frames must be rows",
+        )
+    if array.shape[1] != channel_count:
+        raise _failure(
+            canonical_id,
+            "signature_path",
+            "path_channels",
+            f"signature path must contain exactly {channel_count} ordered channels",
+        )
+    if not isinstance(order, (int, np.integer)) or isinstance(order, bool) or order < 1:
+        raise _failure(
+            canonical_id,
+            "signature_path",
+            "invalid_order",
+            "signature order must be a positive integer",
+        )
+    if array.shape[0] < int(order) + 1:
+        raise _failure(
+            canonical_id,
+            "signature_path",
+            "path_too_short",
+            "signature path must contain at least order + 1 frames",
+        )
+    if not np.isfinite(array).all():
+        raise _failure(
+            canonical_id,
+            "signature_path",
+            "path_non_finite",
+            "signature path contains a non-finite value",
+        )
+    time = array[:, 0]
+    if not np.all(np.diff(time) >= 0) or not np.isclose(time[0], 0.0) or not np.isclose(
+        time[-1], 1.0
+    ):
+        raise _failure(
+            canonical_id,
+            "signature_path",
+            "invalid_time_channel",
+            "time channel must be monotone from zero to one",
+        )
+    return array
 
-        # Verify the resampling worked
-        if (
-            abs(len(y) / sr - len(y_orig) / sr_orig) > 0.1
-        ):  # Allow 0.1 second difference
-            logger.warning("Duration mismatch after resampling!")
 
-        # Check for silent or corrupted audio
-        if np.max(np.abs(y)) < 1e-6:
-            logger.warning("Audio appears to be silent or corrupted")
-            # Return a small dummy audio signal
-            y = np.random.normal(0, 0.01, 22050)  # 1 second of noise
-            sr = target_sr
+def _bounded_frame_indices(frame_count: int) -> np.ndarray:
+    """Return deterministic, strictly bounded frame indices including endpoints."""
 
-        return y, sr
-
-    except Exception as e:
-        logger.error("Error loading audio file %s: %s", file_path, e)
-        # Return a dummy audio signal
-        target_sr = 22050  # Define target_sr here
-        y = np.random.normal(0, 0.01, target_sr)  # 1 second of noise
-        sr = target_sr
-        return y, sr
-
-
-def create_multidimensional_timeseries(pitch, loudness, _, mfccs, sr, y):
-    """Creates a multi-dimensional time series from the extracted features."""
-    logger.debug("Creating multi-dimensional time series")
-    logger.debug("Input sampling rate: %d", sr)
-    logger.debug("Pitch shape: %s", pitch.shape)
-    logger.debug("Loudness shape: %s", loudness.shape)
-    logger.debug("MFCCs shape: %s", mfccs.shape)
-    logger.debug("Audio length: %d", len(y))
-
-    # Ensure all features have the same time resolution
-    pitch_1d = np.median(
-        pitch, axis=0
-    )  # Take the median pitch value for each time step
-    logger.debug("Pitch 1D shape: %s", pitch_1d.shape)
-
-    # Define a common time grid for all features
-    max_points = 10000
-    if len(y) > max_points:
-        step = len(y) // max_points
-        y = y[::step]
-        common_time = np.linspace(0, len(y) / sr, len(y))
-        logger.debug("Downsampled audio length to %d points", len(y))
-        logger.debug("New effective sampling rate: %.2f Hz", sr / step)
-    else:
-        common_time = np.linspace(0, len(y) / sr, len(y))
-
-    logger.debug("Common time shape: %s", common_time.shape)
-
-    # Interpolate features onto the common time grid
-    pitch_interpolated = np.interp(
-        common_time, np.linspace(0, len(pitch_1d) / sr, len(pitch_1d)), pitch_1d
+    if frame_count <= MAX_PATH_POINTS:
+        return np.arange(frame_count, dtype=np.int64)
+    return (
+        np.arange(MAX_PATH_POINTS, dtype=np.int64) * (frame_count - 1)
+        // (MAX_PATH_POINTS - 1)
     )
-    logger.debug("Pitch interpolated shape: %s", pitch_interpolated.shape)
 
-    loudness_interpolated = np.interp(
-        common_time, np.linspace(0, len(loudness) / sr, len(loudness)), loudness
+
+def _standardise_path_channels(values: np.ndarray) -> np.ndarray:
+    """Remove per-column physical units before bounded outlier clipping."""
+
+    means = np.mean(values, axis=0, dtype=np.float64)
+    scales = np.std(values, axis=0, dtype=np.float64)
+    non_constant = scales > 1e-12
+    standardised = np.zeros_like(values, dtype=np.float64)
+    standardised[:, non_constant] = (
+        values[:, non_constant] - means[non_constant]
+    ) / scales[non_constant]
+    return np.clip(
+        standardised,
+        -STANDARDISED_CLIP_LIMIT,
+        STANDARDISED_CLIP_LIMIT,
     )
-    logger.debug("Loudness interpolated shape: %s", loudness_interpolated.shape)
 
-    # Interpolate MFCCs
-    mfccs_interpolated = np.array(
-        [
-            np.interp(
-                common_time, np.linspace(0, len(y) / sr, mfccs.shape[1]), mfccs[i]
-            )
-            for i in range(mfccs.shape[0])
+
+def create_multidimensional_timeseries(
+    pitch, loudness, extra_features, mfccs, sr, y, *, track_id: object = "unknown"
+):
+    """Create one aligned, scaled 38-channel analysis-frame path.
+
+    Every descriptor must provide exactly one value per common centred analysis
+    frame (or one row per channel and column per frame). Frame-count mismatches
+    fail closed rather than being hidden by interpolation.
+    """
+
+    pitch_array = _finite_array(
+        pitch, track_id=track_id, field="pitch", ndim=1
+    )
+    loudness_array = _finite_array(
+        loudness, track_id=track_id, field="loudness", ndim=1
+    )
+    mfcc_array = _finite_array(mfccs, track_id=track_id, field="mfccs", ndim=2)
+    audio = _finite_array(y, track_id=track_id, field="audio", ndim=1)
+    if mfcc_array.shape[0] != 20:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "feature_orientation",
+            "MFCCs must have 20 channel rows",
+        )
+    if not isinstance(sr, (int, np.integer)) or int(sr) <= 0:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "invalid_sample_rate",
+            "sample rate must be a positive integer",
+        )
+    if not isinstance(extra_features, Mapping):
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "invalid_feature",
+            "extra_features must be a mapping of chroma/spectral/zcr channels",
+        )
+    required_extra = {
+        "chroma",
+        "spectral_centroid",
+        "spectral_bandwidth",
+        "zero_crossing_rate",
+    }
+    missing_extra = sorted(required_extra - set(extra_features))
+    if missing_extra:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "missing_feature",
+            f"extra_features is missing: {', '.join(missing_extra)}",
+        )
+
+    chroma_array = _finite_array(
+        extra_features["chroma"], track_id=track_id, field="chroma", ndim=2
+    )
+    if chroma_array.shape[0] != CHROMA_CHANNEL_COUNT:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "feature_orientation",
+            f"chroma must have {CHROMA_CHANNEL_COUNT} channel rows",
+        )
+    spectral_centroid_array = _finite_array(
+        extra_features["spectral_centroid"],
+        track_id=track_id,
+        field="spectral_centroid",
+        ndim=1,
+    )
+    spectral_bandwidth_array = _finite_array(
+        extra_features["spectral_bandwidth"],
+        track_id=track_id,
+        field="spectral_bandwidth",
+        ndim=1,
+    )
+    zero_crossing_rate_array = _finite_array(
+        extra_features["zero_crossing_rate"],
+        track_id=track_id,
+        field="zero_crossing_rate",
+        ndim=1,
+    )
+
+    expected_frames = 1 + len(audio) // HOP_LENGTH
+    frame_counts = {
+        "pitch": pitch_array.shape[0],
+        "loudness": loudness_array.shape[0],
+        "mfccs": mfcc_array.shape[1],
+        "chroma": chroma_array.shape[1],
+        "spectral_centroid": spectral_centroid_array.shape[0],
+        "spectral_bandwidth": spectral_bandwidth_array.shape[0],
+        "zero_crossing_rate": zero_crossing_rate_array.shape[0],
+    }
+    mismatched = sorted(
+        field for field, count in frame_counts.items() if count != expected_frames
+    )
+    if mismatched:
+        details = ", ".join(
+            f"{field}={frame_counts[field]}" for field in sorted(frame_counts)
+        )
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "inconsistent_frames",
+            (
+                f"all descriptors must have {expected_frames} centred analysis "
+                f"frames derived from the audio; got {details}"
+            ),
+        )
+    if expected_frames < 3:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "path_too_short",
+            "audio does not provide at least three aligned analysis frames",
+        )
+
+    raw_values = np.vstack(
+        [pitch_array, loudness_array]
+        + [mfcc_array[index] for index in range(20)]
+        + [chroma_array[index] for index in range(CHROMA_CHANNEL_COUNT)]
+        + [
+            spectral_centroid_array,
+            spectral_bandwidth_array,
+            zero_crossing_rate_array,
         ]
-    )
-    logger.debug("MFCCs interpolated shape: %s", mfccs_interpolated.shape)
-
-    # Add time as a monotone component
-    max_time = np.max(common_time)
-    if max_time > 0:
-        time_component = common_time / max_time  # Normalise to [0,1]
-    else:
-        # Fallback for edge case (shouldn't happen in practice)
-        time_component = np.zeros_like(common_time)
-    logger.debug("Time component shape: %s", time_component.shape)
-
-    # Combine all features into a single multi-dimensional array
-    multi_dimensional_series = np.vstack(
-        [time_component, pitch_interpolated, loudness_interpolated]
-        + [mfccs_interpolated[i] for i in range(mfccs_interpolated.shape[0])]
     ).T
-
-    logger.debug(
-        "Combined array shape before normalisation: %s", multi_dimensional_series.shape
+    selected = _bounded_frame_indices(expected_frames)
+    scaled_values = _standardise_path_channels(raw_values)[selected]
+    frame_length = min(FRAME_LENGTH, len(audio))
+    frame_times = librosa.frames_to_time(
+        selected,
+        sr=int(sr),
+        hop_length=HOP_LENGTH,
+        n_fft=frame_length,
     )
-
-    # Normalise the data
-    multi_dimensional_series = np.nan_to_num(
-        multi_dimensional_series, nan=0.0, posinf=1.0, neginf=-1.0
-    )
-    multi_dimensional_series = multi_dimensional_series.astype(np.float32)
-
-    # For path signatures, preserve relative magnitudes but scale appropriately
-    # Don't standardise, but ensure reasonable scale for numerical stability
-    # Exclude time_component from clipping
-    time_component = multi_dimensional_series[:, 0]  # Extract time column
-    feature_dimensions = multi_dimensional_series[:, 1:]  # Extract feature columns
-    feature_dimensions = np.clip(feature_dimensions, -5, 5)  # Clip feature dimensions
-
-    # Recombine time_component with clipped feature dimensions
-    multi_dimensional_series = np.column_stack((time_component, feature_dimensions))
-    logger.debug("Final shape: %s", multi_dimensional_series.shape)
-    logger.debug("Data type: %s", multi_dimensional_series.dtype)
-    logger.debug(
-        "Range: [%f, %f]",
-        np.min(multi_dimensional_series),
-        np.max(multi_dimensional_series),
-    )
-    logger.debug("NaN values: %d", np.isnan(multi_dimensional_series).sum())
-    logger.debug("Inf values: %d", np.isinf(multi_dimensional_series).sum())
-
-    return multi_dimensional_series
+    elapsed = frame_times - frame_times[0]
+    if elapsed[-1] <= 0.0:
+        raise _failure(
+            track_id,
+            "feature_extraction",
+            "path_too_short",
+            "selected analysis-frame clock has no positive duration",
+        )
+    time_component = elapsed / elapsed[-1]
+    path = np.column_stack((time_component, scaled_values)).astype(np.float32)
+    return validate_signature_path(path, track_id=track_id, order=2)

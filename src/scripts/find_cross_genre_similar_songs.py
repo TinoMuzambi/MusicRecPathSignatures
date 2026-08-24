@@ -167,7 +167,11 @@ def create_similarity_plot(
         hspace=0.5,  # Increased spacing to prevent title overlap
         wspace=0.4,
         left=0.12,  # Increase left margin for y-axis labels
-        top=0.95,  # Add top margin to prevent title overlap
+        # Leave enough headroom above the top-row subplots for both their
+        # own titles (with padding) and the figure suptitle below it,
+        # otherwise "Cross-Genre Similarity Heatmap" collides with
+        # "Songs from Different Genres with Similar Sound".
+        top=0.86,
     )
 
     # Plot 1: Similarity heatmap for selected pairs
@@ -294,7 +298,7 @@ def create_similarity_plot(
         "Cross-Genre Similarity Heatmap",
         fontsize=14,
         fontweight="bold",
-        pad=25,
+        pad=12,
         ha="center",
     )
     ax1.set_xlabel("Songs", fontsize=12)
@@ -410,8 +414,9 @@ def create_similarity_plot(
     ax3_dist.set_xlabel("Similarity Score", fontsize=11)
     ax3_dist.set_ylabel("Frequency", fontsize=11)
     ax3_dist.set_title(
-        "Similarity Distribution\n(all cross-genre pairs)",
-        fontsize=13,
+        f"Similarity Distribution\n(top {len(pairs)} pairs shown, "
+        "similarity-threshold-selected, not corpus-representative)",
+        fontsize=11,
         fontweight="bold",
         pad=15,
         ha="center",
@@ -488,11 +493,14 @@ def create_similarity_plot(
         "Songs from Different Genres with Similar Sound",
         fontsize=16,
         fontweight="bold",
-        y=0.995,  # Move slightly higher to avoid overlap
+        y=0.98,
     )
 
-    # Adjust margins to give more space for y-axis labels and prevent title overlap
-    plt.subplots_adjust(left=0.15, right=0.95, top=0.92, bottom=0.1)
+    # NOTE: axes were placed via `fig.add_gridspec(..., top=0.86, ...)` above,
+    # so a subsequent `plt.subplots_adjust(top=...)` call would have no
+    # effect on their already-fixed positions; the vertical spacing that
+    # keeps the suptitle clear of the subplot titles is controlled entirely
+    # by the gridspec's `top` parameter and each subplot title's `pad`.
 
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     logger.info("Saved visualisation to %s", output_path)
@@ -537,12 +545,17 @@ def main():
 
     args = parser.parse_args()
 
-    # Convert to absolute paths
-    # Script is at code/src/scripts/, so go up 3 levels to get to code/
-    base_path = Path(__file__).parent.parent.parent
-    similarity_matrix_path = base_path / args.similarity_matrix
-    tracks_json_path = base_path / args.tracks_json
-    output_path = base_path / args.output
+    # Resolve relative paths against the current working directory, matching
+    # every other script in this pipeline (run_complete_pipeline.sh always
+    # invokes every step from the repository root as CWD). An earlier
+    # version resolved these against Path(__file__).parent.parent.parent --
+    # the script's own on-disk location -- which happened to coincide with
+    # CWD in the real deployment layout, but silently wrote/read the wrong
+    # files whenever this script was invoked from any other working
+    # directory (a genuine bug found during a pre-run integration check).
+    similarity_matrix_path = Path(args.similarity_matrix)
+    tracks_json_path = Path(args.tracks_json)
+    output_path = Path(args.output)
 
     # Create output directory if it doesn't exist
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -583,12 +596,23 @@ def main():
     )
 
     if not pairs:
-        logger.warning(
-            "No cross-genre similar pairs found with similarity >= %.2f",
-            args.min_similarity,
+        # Exiting 0 here would let the pipeline record a successful step that
+        # produced no figure, which is how this figure came to be cited while
+        # never actually being generated. Fail loudly instead. Note that under
+        # real order-2 signatures the corpus-wide mean pairwise similarity is
+        # around 0.023, so the default 0.7 threshold selecting nothing is the
+        # expected outcome, not an anomaly to be tuned away: lowering the
+        # threshold until pairs appear would manufacture the appearance of
+        # cross-genre similarity rather than measure it.
+        raise SystemExit(
+            "No cross-genre pairs met the similarity threshold "
+            f"(>= {args.min_similarity:.2f}); no figure was written. This is "
+            "expected for a representation whose corpus-wide mean pairwise "
+            "similarity is far below the threshold. Do not lower the "
+            "threshold to force pairs to appear -- use "
+            "analyze_cross_genre_behaviour.py, which measures cross-genre "
+            "behaviour comparably across all methods."
         )
-        logger.info("Try lowering --min-similarity threshold")
-        return
 
     # Create visualisation
     create_similarity_plot(

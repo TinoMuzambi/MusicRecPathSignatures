@@ -781,8 +781,11 @@ def main():
             len(ground_truth),
         )
 
-    # Load popularity scores
-    popularity_scores = {}
+    # Load popularity scores. None (not {}) signals "unavailable" to
+    # compute_all_metrics, which already reports novelty as an explicit
+    # unavailable_metric in that case rather than crashing on the first
+    # recommendation missing from an empty popularity mapping.
+    popularity_scores = None
     if args.popularity_file and os.path.exists(args.popularity_file):
         popularity_scores = load_popularity_scores(args.popularity_file)
 

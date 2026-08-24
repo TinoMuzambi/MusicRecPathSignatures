@@ -5,6 +5,7 @@ This module tests the TimingReport class and memory usage functions.
 """
 
 import time
+import pytest
 from src.utils.timing import TimingReport, get_memory_usage_mb
 
 
@@ -115,6 +116,9 @@ class TestTimingReport:
         assert "total_duration_formatted" in report_dict
         assert "sections" in report_dict
         assert report_dict["script_name"] == "test_script.py"
+        assert report_dict["process_tree_peak_rss_mb"] >= 0
+        assert report_dict["endpoint_process_tree_rss_mb"] >= 0
+        assert report_dict["peak_memory_mb"] == report_dict["process_tree_peak_rss_mb"]
 
     def test_to_markdown(self):
         """Test conversion to markdown."""
@@ -191,6 +195,15 @@ class TestTimingReport:
         assert not json_path.exists()
         assert md_path.exists()
 
+    def test_save_report_rejects_unknown_format(self, tmp_path):
+        report = TimingReport("test_script.py")
+        report.start()
+        report.stop()
+
+        with pytest.raises(ValueError, match="format"):
+            report.save_report(tmp_path, format="yaml")
+        assert not tuple(tmp_path.iterdir())
+
     def test_print_summary(self, capsys):
         """Test printing summary."""
         report = TimingReport("test_script.py")
@@ -241,4 +254,3 @@ class TestTimingReport:
         assert len(report.sections) == 2
         assert report.sections[0]["section"] == "section1"
         assert report.sections[1]["section"] == "section2"
-

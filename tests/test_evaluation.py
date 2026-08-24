@@ -164,6 +164,35 @@ class TestClassificationMetrics:
         assert cm.shape == (3, 3)  # 3 classes
         assert np.sum(cm) == len(self.y_true)
 
+    def test_plot_confusion_matrix_omits_title_by_default(self, tmp_path):
+        """G-05: this is the LaTeX-cited confusion matrix
+        (results/evaluation/confusion_matrix.png, synced by sync_figures.py).
+        Its caption already names it, so no redundant internal title should
+        be drawn unless the caller explicitly asks for one.
+        """
+
+        import matplotlib.pyplot as plt
+
+        captured = {}
+        original_figure = plt.figure
+
+        def _spy_figure(*args, **kwargs):
+            fig = original_figure(*args, **kwargs)
+            captured["fig"] = fig
+            return fig
+
+        plt.figure = _spy_figure
+        try:
+            self.metrics.plot_confusion_matrix(
+                self.y_true,
+                self.y_pred,
+                class_names=["A", "B", "C"],
+                save_path=str(tmp_path / "cm.png"),
+            )
+        finally:
+            plt.figure = original_figure
+        assert captured["fig"].axes[0].get_title() == ""
+
     def test_compute_classification_report(self):
         """Test classification report generation."""
         report = self.metrics.compute_classification_report(self.y_true, self.y_pred)

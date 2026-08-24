@@ -11,32 +11,98 @@ from src.visualisation.publication_plots import (
     bar_with_cis,
     heatmap_matrix,
 )
-from src.scripts.generate_system_architecture import create_system_architecture_diagram
+from src.scripts.run_baseline_comparison_multiple_runs import (
+    CANONICAL_BASELINE_IDS,
+    DETERMINISTIC_METHOD_IDS,
+    STOCHASTIC_METHOD_IDS,
+)
 from src.utils.logger_config import setup_logger, configure_logging
 from src.utils.timing import TimingReport
 
 
 logger = setup_logger("generate_dissertation_figures")
 
+# MR-06 canonical method IDs (see run_baseline_comparison_multiple_runs.py) and
+# their human-readable display names for figure labels/legends.
+PATH_SIGNATURE_METHOD_ID = next(
+    method_id
+    for method_id in DETERMINISTIC_METHOD_IDS
+    if method_id.startswith("path_signature_cosine")
+)
+PATH_SIGNATURE_DISPLAY_NAME = "Path Signature"
+METHOD_DISPLAY_NAMES = {
+    PATH_SIGNATURE_METHOD_ID: PATH_SIGNATURE_DISPLAY_NAME,
+    "traditional_audio_cosine": "Traditional Audio",
+    "lightfm_warp": "LightFM (WARP)",
+    "lightfm_warp_kos": "LightFM (WARP k-OS)",
+    "lightfm_latent_blend": "LightFM (Latent Blend)",
+    "implicit_als": "Implicit ALS",
+}
+
+
+def build_significance_annotations(
+    comparisons: dict,
+) -> tuple[list[float], list[str]]:
+    """Build fig_06's per-baseline p-values and "p=...\\n(direction)" cell text.
+
+    ``direction`` in a comparison record is
+    sign(path_signature_precision - baseline_precision) (see
+    ``wilcoxon_aligned``'s call order in
+    ``run_baseline_comparison_multiple_runs.build_precision5_inference``, and
+    ``wilcoxon_test``'s ``differences = first - second``): negative means
+    the proposed path-signature method scored lower than that baseline, so
+    it is labelled "worse", not "better" (R9 evidence audit F-09 -- colour
+    alone cannot convey this direction).
+    """
+
+    p_values: list[float] = []
+    annotations: list[str] = []
+    for baseline_id in CANONICAL_BASELINE_IDS:
+        key = f"{PATH_SIGNATURE_METHOD_ID}_vs_{baseline_id}"
+        comparison = comparisons.get(key, {})
+        if comparison.get("status") == "available":
+            p = comparison.get("p_value_adjusted", comparison["p_value"])
+            direction = comparison.get("direction", 0.0)
+            direction_label = "worse" if direction < 0 else (
+                "better" if direction > 0 else "tied"
+            )
+            annotations.append(f"p={p:.3g}\n({direction_label})")
+        else:
+            p = float("nan")
+            annotations.append("n/a")
+            logger.warning(
+                "Comparison %s unavailable (%s); plotting as NaN",
+                key,
+                comparison.get("reason_code", "missing"),
+            )
+        p_values.append(p)
+    return p_values, annotations
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate dissertation figures")
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument(
-        "--baseline-results",
+        "--run-dir",
         type=str,
-        default="results/baseline_comparison/baseline_comparison_results.json",
-    )
-    parser.add_argument(
-        "--stats-json",
-        type=str,
-        default="results/baseline_comparison/statistical_comparison.json",
+        default="results/baseline_comparison",
+        help=(
+            "MR-06 canonical baseline-comparison run directory (as written by "
+            "run_baseline_comparison_cli.py / run_canonical_comparison), "
+            "containing aggregate_metrics.json, uncertainty.json and "
+            "precision5_inference.json."
+        ),
     )
     parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
+    parser.add_argument(
+        "--release-mode",
+        action="store_true",
+        help="Write only the two deterministic canonical PNG outputs.",
     )
     return parser.parse_args()
 
@@ -50,126 +116,100 @@ def main():
     
     # Set up logging with file handler
     log_file = out / "generate_dissertation_figures.log"
-    configure_logging(args.log_level, log_file=str(log_file))
-    logger.info("Logging to file: %s", log_file)
+    configure_logging(
+        args.log_level,
+        log_file=None if args.release_mode else str(log_file),
+    )
+    if not args.release_mode:
+        logger.info("Logging to file: %s", log_file)
 
     # Initialize timing
     timing = TimingReport("generate_dissertation_figures")
     timing.start()
 
-    # Figure 05: method comparison with CIs (if available); fallback to bars without CIs
-    # Figure 05: method comparison with CIs
-    try:
-        with timing.section("Figure 05: Method Comparison"):
-            with open(args.baseline_results, "r", encoding="utf-8") as f:
-                res = json.load(f)
-            labels = sorted(res.keys())
-            k = str(5)  # K=5 for the plot
-            means = []
-            ci_l = []
-            ci_h = []
-            
-            for m in labels:
-                # Use per-user data if available for accurate CIs
-                per_user = res[m].get("per_user_precision", {}).get(k, [])
-                if per_user and len(per_user) > 0 and sum(per_user) > 0:
-                    data = np.array(per_user)
-                    mean = np.mean(data)
-                    # Calculate 95% CI using standard error
-                    se = np.std(data, ddof=1) / np.sqrt(len(data))
-                    ci = 1.96 * se
-                    means.append(mean)
-                    ci_l.append(max(0.0, mean - ci))
-                    ci_h.append(min(1.0, mean + ci))
-                    logger.info("Method %s: Mean=%.4f, CI=%.4f", m, mean, ci)
-                else:
-                    # Fallback to pre-computed mean if per-user data missing or empty (e.g. all zeros)
-                    prec = res[m].get("precision", {})
-                    mean = prec.get(k, prec.get(int(k), 0.0)) if isinstance(prec, dict) else 0.0
-                    means.append(mean)
-                    # If mean is 0, CI is 0
-                    if mean == 0:
-                         ci_l.append(0.0)
-                         ci_h.append(0.0)
-                    else:
-                        # Warning if no per-user data but non-zero mean (shouldn't happen with current data)
-                        logger.warning("Method %s: No per-user data for CI calculation, using 0", m)
-                        ci_l.append(mean)
-                        ci_h.append(mean)
+    run_dir = Path(args.run_dir)
 
-            bar_with_cis(
-                labels,
-                means,
-                ci_l,
-                ci_h,
-                ylabel="Precision@5",
-                title="Baseline Comparison",
-                out_path=out / "fig_05_method_comparison.png",
-            )
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("Could not generate fig_05: %s", exc)
+    # Figure 05: method comparison with bootstrap CIs on Precision@5, read
+    # from the MR-06 canonical run directory's uncertainty.json (the
+    # aligned-percentile-bootstrap estimate/ci_low/ci_high per method,
+    # computed once by run_canonical_comparison -- see
+    # src/scripts/run_baseline_comparison.py::_aggregate_saved_rows).
+    with timing.section("Figure 05: Method Comparison"):
+        with open(run_dir / "uncertainty.json", "r", encoding="utf-8") as f:
+            uncertainty = json.load(f)
+        expected_methods = set(DETERMINISTIC_METHOD_IDS) | set(STOCHASTIC_METHOD_IDS)
+        if set(uncertainty.get("methods", {})) != expected_methods:
+            raise ValueError("uncertainty method family does not match the release contract")
+        method_ids = sorted(uncertainty["methods"])
+        labels = [METHOD_DISPLAY_NAMES.get(m, m) for m in method_ids]
+        means = [uncertainty["methods"][m]["estimate"] for m in method_ids]
+        ci_l = [uncertainty["methods"][m]["ci_low"] for m in method_ids]
+        ci_h = [uncertainty["methods"][m]["ci_high"] for m in method_ids]
+        numeric = np.asarray([means, ci_l, ci_h], dtype=np.float64)
+        if not np.isfinite(numeric).all() or np.any(numeric < 0.0) or np.any(numeric > 1.0):
+            raise ValueError("uncertainty values must be finite probabilities")
+        if np.any(numeric[1] > numeric[0]) or np.any(numeric[0] > numeric[2]):
+            raise ValueError("uncertainty intervals do not contain their estimates")
+        for m, mean, lo, hi in zip(method_ids, means, ci_l, ci_h):
+            logger.info("Method %s: estimate=%.4f, CI=[%.4f, %.4f]", m, mean, lo, hi)
 
-    # System Architecture diagram
-    try:
-        with timing.section("System Architecture Diagram"):
-            create_system_architecture_diagram(
-                out / "system_architecture.png",
-                dpi=300
-            )
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("Could not generate system architecture diagram: %s", exc)
+        bar_with_cis(
+            labels,
+            means,
+            ci_l,
+            ci_h,
+            ylabel="Precision@5",
+            out_path=out / "fig_05_method_comparison.png",
+            highlight_label=PATH_SIGNATURE_DISPLAY_NAME,
+            sort_descending=True,
+        )
 
-    # Figure 06: significance heatmap
-    try:
-        with timing.section("Figure 06: Significance Heatmap"):
-            with open(args.stats_json, "r", encoding="utf-8") as f:
-                stats = json.load(f)
-            models = sorted(
-                set(
-                    [name.split(" vs ")[0] for name in stats.keys()]
-                    + [name.split(" vs ")[1] for name in stats.keys()]
-                )
-            )
-            n = len(models)
-            mat = np.ones((n, n))
-            for i, m1 in enumerate(models):
-                for j, m2 in enumerate(models):
-                    if i == j:
-                        mat[i, j] = 1.0
-                    else:
-                        key = f"{m1} vs {m2}"
-                        reverse_key = f"{m2} vs {m1}"
-                        
-                        target_key = None
-                        if key in stats:
-                            target_key = key
-                        elif reverse_key in stats:
-                            target_key = reverse_key
-                        
-                        if target_key:
-                            p = stats[target_key].get(
-                                "p_value_adjusted", stats[target_key].get("p_value", 1.0)
-                            )
-                        else:
-                            mat[i, j] = 1.0
-                            continue
-                        mat[i, j] = p
-            heatmap_matrix(
-                mat,
-                models,
-                models,
-                title="Significance (p-values)",
-                out_path=out / "fig_06_significance_heatmap.png",
-                cmap="RdBu_r",
-                vmin=0.0,
-                vmax=1.0,
-            )
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("Could not generate fig_06: %s", exc)
+    # Figure 06: significance heatmap.
+    #
+    # The MR-06 canonical engine does not compute a full pairwise
+    # significance matrix across every method pair (there is no
+    # baseline-vs-baseline Wilcoxon test); by design (build_precision5_inference
+    # in run_baseline_comparison_multiple_runs.py) it only ever tests the five
+    # planned "Path Signature vs each baseline" comparisons with one shared
+    # Benjamini-Hochberg correction. So fig_06 is a single-row heatmap of
+    # Path Signature vs each canonical baseline, using the real
+    # BH-adjusted p-values from precision5_inference.json -- not a fabricated
+    # full pairwise matrix.
+    with timing.section("Figure 06: Significance Heatmap"):
+        with open(run_dir / "precision5_inference.json", "r", encoding="utf-8") as f:
+            inference = json.load(f)
+        if inference.get("run_id") != uncertainty.get("run_id"):
+            raise ValueError("figure inputs have mixed run IDs")
+        comparisons = inference["comparisons"]
+        expected_comparisons = {
+            f"{PATH_SIGNATURE_METHOD_ID}_vs_{baseline}"
+            for baseline in CANONICAL_BASELINE_IDS
+        }
+        if set(comparisons) != expected_comparisons:
+            raise ValueError("inference comparison family does not match the release contract")
+        p_values, annotation_row = build_significance_annotations(comparisons)
+        if not np.isfinite(np.asarray(p_values, dtype=np.float64)).all():
+            raise ValueError("all planned release comparisons must be available")
+        mat = np.array([p_values])
+        annotations = np.array([annotation_row])
+        baseline_labels = [
+            METHOD_DISPLAY_NAMES.get(m, m) for m in CANONICAL_BASELINE_IDS
+        ]
+        heatmap_matrix(
+            mat,
+            baseline_labels,
+            [PATH_SIGNATURE_DISPLAY_NAME],
+            out_path=out / "fig_06_significance_heatmap.png",
+            cmap="RdBu_r",
+            vmin=0.0,
+            vmax=1.0,
+            annotations=annotations,
+        )
 
     # Stop timing and save report
     timing.stop()
-    timing.save_report(out)
+    if not args.release_mode:
+        timing.save_report(out)
     timing.print_summary()
 
     logger.info("Dissertation figures generated in %s", out)

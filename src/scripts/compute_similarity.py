@@ -10,20 +10,218 @@ and saving similarity matrices for later use in recommendation systems.
 
 import argparse
 import json
+import math
 import os
 import psutil
 import gc
 import tempfile
 import shutil
+from collections.abc import Callable, Mapping, Sequence
 from src.utils.logger_config import setup_logger, configure_logging
-from src.utils.timing import TimingReport
-from src.signatures.path_signatures import PathSignature
-from src.analysis.softmax_regression import SoftmaxRegression
-from src.utils.metadata import load_tracks_metadata
+from src.utils.timing import ProcessTreeRSSMonitor, TimingReport
+from src.evaluation.experiment_protocol import ProtocolError, normalise_id
 from pathlib import Path
 import numpy as np
 
 logger = setup_logger("main")
+
+
+class SimilarityComputationError(ValueError):
+    """Raised when a bounded similarity computation cannot be trusted."""
+
+
+def _positive_integer(value, *, field):
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise SimilarityComputationError(f"{field} must be a positive integer")
+    result = int(value)
+    if result <= 0:
+        raise SimilarityComputationError(f"{field} must be a positive integer")
+    return result
+
+
+def _canonical_ids(values, *, kind):
+    if isinstance(values, (str, bytes, bytearray)):
+        raise SimilarityComputationError(f"{kind} IDs must be a collection")
+    try:
+        identifiers = tuple(normalise_id(value, kind=kind) for value in values)
+    except (ProtocolError, TypeError) as exc:
+        raise SimilarityComputationError(str(exc)) from exc
+    if len(set(identifiers)) != len(identifiers):
+        raise SimilarityComputationError(
+            f"duplicate {kind} ID after normalisation"
+        )
+    return identifiers
+
+
+def blockwise_cosine_top_k(
+    matrix,
+    ordered_ids,
+    *,
+    query_ids,
+    candidates_by_query,
+    k,
+    query_block_size=32,
+    candidate_block_size=512,
+    use_float32=False,
+    float32_atol=1e-6,
+    rss_monitor=None,
+    rss_ceiling_mb=None,
+    block_observer=None,
+):
+    """Return deterministic cosine top-k rankings without an all-pairs matrix.
+
+    Float32 is optional and accepted only when each processed score block stays
+    within the declared absolute tolerance of a common float64-source oracle.
+    The process-tree RSS monitor is checked between bounded blocks so a breach
+    aborts before any partial ranking can escape.
+    """
+
+    k = _positive_integer(k, field="k")
+    query_block_size = _positive_integer(
+        query_block_size, field="query block size"
+    )
+    candidate_block_size = _positive_integer(
+        candidate_block_size, field="candidate block size"
+    )
+    if not isinstance(use_float32, bool):
+        raise SimilarityComputationError("use_float32 must be boolean")
+    if (
+        isinstance(float32_atol, bool)
+        or not isinstance(float32_atol, (int, float, np.integer, np.floating))
+        or not math.isfinite(float(float32_atol))
+        or float(float32_atol) < 0.0
+    ):
+        raise SimilarityComputationError(
+            "float32 tolerance must be a finite non-negative number"
+        )
+    if block_observer is not None and not callable(block_observer):
+        raise SimilarityComputationError("block observer must be callable")
+    if not isinstance(candidates_by_query, Mapping):
+        raise SimilarityComputationError("candidates_by_query must be a mapping")
+
+    source = np.asarray(matrix)
+    if source.ndim != 2 or source.shape[0] == 0 or source.shape[1] == 0:
+        raise SimilarityComputationError("matrix must be a non-empty 2D array")
+    if source.dtype.kind not in "iuf" or source.dtype.kind == "b":
+        raise SimilarityComputationError("matrix must be numeric")
+    if not np.all(np.isfinite(source)):
+        raise SimilarityComputationError("matrix must contain only finite values")
+    if use_float32 and source.dtype != np.dtype(np.float64):
+        raise SimilarityComputationError(
+            "float32 comparison requires an explicit float64 source"
+        )
+
+    catalogue_ids = _canonical_ids(ordered_ids, kind="track")
+    if len(catalogue_ids) != source.shape[0]:
+        raise SimilarityComputationError(
+            "ordered IDs must match the matrix row count"
+        )
+    queries = _canonical_ids(query_ids, kind="query")
+    if not queries:
+        raise SimilarityComputationError("at least one query ID is required")
+    id_to_index = {identifier: index for index, identifier in enumerate(catalogue_ids)}
+    unknown_queries = sorted(set(queries).difference(id_to_index))
+    if unknown_queries:
+        raise SimilarityComputationError(f"unknown query IDs: {unknown_queries}")
+
+    normalised_candidates = {}
+    candidate_keys = _canonical_ids(candidates_by_query.keys(), kind="query")
+    if set(candidate_keys) != set(queries):
+        raise SimilarityComputationError(
+            "candidate mapping keys must exactly match query IDs"
+        )
+    raw_by_canonical = {
+        canonical: candidates_by_query[raw]
+        for canonical, raw in zip(candidate_keys, candidates_by_query.keys())
+    }
+    for query_id in queries:
+        candidates = _canonical_ids(
+            raw_by_canonical[query_id], kind="candidate track"
+        )
+        if len(candidates) < k:
+            raise SimilarityComputationError(
+                f"query {query_id!r} has fewer than k candidates"
+            )
+        unknown = sorted(set(candidates).difference(id_to_index))
+        if unknown:
+            raise SimilarityComputationError(f"unknown candidate IDs: {unknown}")
+        normalised_candidates[query_id] = candidates
+
+    if rss_monitor is not None and rss_ceiling_mb is not None:
+        raise SimilarityComputationError(
+            "provide either an RSS monitor or an RSS ceiling, not both"
+        )
+    if rss_monitor is not None and not isinstance(rss_monitor, ProcessTreeRSSMonitor):
+        raise SimilarityComputationError("rss_monitor must be a ProcessTreeRSSMonitor")
+    monitor = rss_monitor or ProcessTreeRSSMonitor(rss_ceiling_mb=rss_ceiling_mb)
+    if monitor.is_running:
+        raise SimilarityComputationError("rss_monitor must not already be running")
+
+    rankings = {}
+    failure = None
+    monitor.start()
+    try:
+        source64 = np.asarray(source, dtype=np.float64, order="C")
+        norms64 = np.linalg.norm(source64, axis=1)
+        if not np.all(np.isfinite(norms64)) or np.any(norms64 == 0.0):
+            raise SimilarityComputationError(
+                "matrix rows must have finite, non-zero Euclidean norm"
+            )
+        normalised64 = np.ascontiguousarray(source64 / norms64[:, None])
+        normalised32 = None
+        if use_float32:
+            source32 = np.asarray(source64, dtype=np.float32, order="C")
+            norms32 = np.linalg.norm(source32, axis=1)
+            if not np.all(np.isfinite(norms32)) or np.any(norms32 == 0.0):
+                raise SimilarityComputationError(
+                    "float32 normalisation produced a non-finite or zero norm"
+                )
+            normalised32 = np.ascontiguousarray(source32 / norms32[:, None])
+        for query_start in range(0, len(queries), query_block_size):
+            monitor.checkpoint()
+            query_block = queries[query_start : query_start + query_block_size]
+            for query_id in query_block:
+                query_index = id_to_index[query_id]
+                scored = []
+                candidates = normalised_candidates[query_id]
+                for candidate_start in range(0, len(candidates), candidate_block_size):
+                    candidate_ids = candidates[
+                        candidate_start : candidate_start + candidate_block_size
+                    ]
+                    candidate_indices = [id_to_index[item] for item in candidate_ids]
+                    scores64 = normalised64[query_index : query_index + 1] @ normalised64[
+                        candidate_indices
+                    ].T
+                    if block_observer is not None:
+                        block_observer(tuple(scores64.shape))
+                    selected_scores = scores64[0]
+                    if normalised32 is not None:
+                        scores32 = normalised32[
+                            query_index : query_index + 1
+                        ] @ normalised32[candidate_indices].T
+                        difference = np.max(
+                            np.abs(scores32.astype(np.float64) - scores64)
+                        )
+                        if difference > float(float32_atol):
+                            raise SimilarityComputationError(
+                                "float32 tolerance exceeded: "
+                                f"max absolute difference {difference:.12g} > "
+                                f"{float(float32_atol):.12g}"
+                            )
+                        selected_scores = scores32[0]
+                    scored.extend(
+                        (identifier, float(score))
+                        for identifier, score in zip(candidate_ids, selected_scores)
+                    )
+                    monitor.checkpoint()
+                scored.sort(key=lambda item: (-item[1], item[0]))
+                rankings[query_id] = tuple(scored[:k])
+        return rankings
+    except BaseException as exc:
+        failure = exc
+        raise
+    finally:
+        monitor.stop(check_limit=failure is None)
 
 
 def get_memory_usage():
@@ -454,6 +652,12 @@ def save_similarity_matrix(similarity_matrix, song_names, output_file):
 
 def main():
     """Entry point for computing similarity matrix from audio features."""
+    # The retired full-matrix CLI keeps its dependencies local so importing the
+    # canonical bounded helper cannot initialise legacy model or feature code.
+    from src.analysis.softmax_regression import SoftmaxRegression
+    from src.signatures.path_signatures import PathSignature
+    from src.utils.metadata import load_tracks_metadata
+
     # Parse command line arguments
     args = parse_args()
 

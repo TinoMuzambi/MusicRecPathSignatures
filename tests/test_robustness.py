@@ -1,6 +1,7 @@
-# Imports not needed - tests use fixtures
+from pathlib import Path
 
 import numpy as np
+import pytest
 
 from src.evaluation.robustness import (
     bootstrap_ci,
@@ -50,3 +51,40 @@ def test_error_analysis_by_group_and_exports(tmp_path):
     save_csv_table(rows, csv_path)
     assert Path(json_path).exists()
     assert Path(csv_path).exists()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [[], [0.1, float("nan")], [0.1, float("inf")]],
+)
+def test_bootstrap_rejects_empty_or_non_finite_data(data):
+    with pytest.raises(ValueError):
+        bootstrap_ci(data)
+
+
+def test_sensitivity_rejects_missing_grid_and_failed_or_non_finite_values():
+    with pytest.raises(ValueError):
+        sensitivity_analysis(lambda size, seed: 0.1, sizes=[], seeds=[1])
+    with pytest.raises(ValueError):
+        sensitivity_analysis(lambda size, seed: 0.1, sizes=[1], seeds=[])
+    with pytest.raises(ValueError):
+        sensitivity_analysis(lambda size, seed: float("nan"), sizes=[1], seeds=[1])
+
+    def failed(_size, _seed):
+        raise RuntimeError("real failure")
+
+    with pytest.raises(RuntimeError, match="real failure"):
+        sensitivity_analysis(failed, sizes=[1], seeds=[1])
+
+
+def test_stability_and_group_analysis_reject_incomplete_inputs():
+    with pytest.raises(ValueError):
+        stability_metrics([])
+    with pytest.raises(ValueError):
+        stability_metrics([[0.1], []])
+    with pytest.raises(ValueError):
+        stability_metrics([[float("nan")]])
+    with pytest.raises(ValueError):
+        error_analysis_by_group({"u1": 0.1}, {})
+    with pytest.raises(ValueError):
+        error_analysis_by_group({"u1": float("inf")}, {"u1": "Rock"})

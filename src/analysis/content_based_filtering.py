@@ -5,13 +5,205 @@ This module implements content-based filtering using traditional audio features
 as a baseline comparison for the path signature approach.
 """
 
+from collections.abc import Iterable, Mapping
+from types import MappingProxyType
 from typing import Dict, List, Tuple, Optional
+
+from .baseline_contract import BaselineFailure, rank_scores
+
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import StandardScaler
+from ..audio.feature_extraction import build_traditional_feature_vector
+from ..audio.processing import TrackProcessingError
+from ..evaluation.experiment_protocol import (
+    ProtocolError,
+    normalise_and_sort_ids,
+    normalise_id,
+)
 from ..utils.logger_config import setup_logger
 
 logger = setup_logger("content_based_filtering")
+
+
+class TraditionalAudioCosineRecommender:
+    """Cosine over catalogue-standardised 72-value audio aggregates.
+
+    The scaler is fitted exactly once, across the complete item catalogue.  Its
+    transformed rows are then normalised and retained so every query reuses the
+    same prepared representation.
+    """
+
+    canonical_method_id = "traditional_audio_cosine"
+
+    def __init__(self) -> None:
+        self._vectors: Dict[str, np.ndarray] = {}
+        self._scaler_diagnostics: Mapping[str, object] = MappingProxyType({})
+
+    @property
+    def scaler_diagnostics(self) -> Mapping[str, object]:
+        """Read-only diagnostics for the fitted catalogue standardiser."""
+
+        return self._scaler_diagnostics
+
+    def fit(
+        self, features_by_track: Mapping[object, Mapping[str, object]]
+    ) -> "TraditionalAudioCosineRecommender":
+        """Validate, column-standardise and row-normalise the catalogue."""
+
+        if not isinstance(features_by_track, Mapping) or not features_by_track:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "fit",
+                "invalid_feature",
+                "features must be a non-empty track mapping",
+            )
+        try:
+            track_ids = normalise_and_sort_ids(
+                features_by_track.keys(), kind="track"
+            )
+        except ProtocolError as exc:
+            code = "duplicate_id" if "duplicate" in str(exc) else "invalid_id"
+            raise BaselineFailure(
+                self.canonical_method_id, "fit", code, str(exc)
+            ) from exc
+
+        normalised_records: Dict[str, Mapping[str, object]] = {}
+        for raw_track_id, features in features_by_track.items():
+            try:
+                track_id = normalise_id(raw_track_id, kind="track")
+            except ProtocolError as exc:
+                raise BaselineFailure(
+                    self.canonical_method_id, "fit", "invalid_id", str(exc)
+                ) from exc
+            normalised_records[track_id] = features
+
+        raw_vectors: list[np.ndarray] = []
+        for track_id in track_ids:
+            try:
+                record = normalised_records[track_id]
+                if isinstance(record, Mapping) and "traditional_feature_vector" in record:
+                    vector = record["traditional_feature_vector"]
+                else:
+                    vector = build_traditional_feature_vector(track_id, record)
+            except (TrackProcessingError, ProtocolError) as exc:
+                raise BaselineFailure(
+                    self.canonical_method_id,
+                    "fit",
+                    "invalid_feature",
+                    f"track {track_id}: {exc}",
+                ) from exc
+            array = np.asarray(vector, dtype=np.float64)
+            if array.shape != (72,) or not np.all(np.isfinite(array)):
+                raise BaselineFailure(
+                    self.canonical_method_id,
+                    "fit",
+                    "invalid_feature",
+                    f"track {track_id} must have exactly 72 finite values",
+                )
+            raw_vectors.append(array)
+
+        raw_matrix = np.vstack(raw_vectors)
+        scaler = StandardScaler()
+        matrix = np.asarray(scaler.fit_transform(raw_matrix), dtype=np.float64)
+        if not np.all(np.isfinite(matrix)):
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "fit",
+                "invalid_feature",
+                "catalogue standardisation produced non-finite values",
+            )
+        norms = np.linalg.norm(matrix, axis=1)
+        zero_rows = np.flatnonzero(~np.isfinite(norms) | (norms == 0.0))
+        if zero_rows.size:
+            failing = tuple(track_ids[int(index)] for index in zero_rows)
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "fit",
+                "zero_norm_after_standardisation",
+                f"tracks have no cosine direction after standardisation: {failing}",
+            )
+        matrix /= norms[:, None]
+        matrix.setflags(write=False)
+        zero_variance = tuple(int(index) for index in np.flatnonzero(scaler.var_ == 0.0))
+        self._vectors = {
+            track_id: matrix[index] for index, track_id in enumerate(track_ids)
+        }
+        self._scaler_diagnostics = MappingProxyType(
+            {
+                "n_tracks": len(track_ids),
+                "n_features": int(matrix.shape[1]),
+                "standardisation": "catalogue_column_zscore",
+                "zero_variance_feature_count": len(zero_variance),
+                "zero_variance_feature_indices": zero_variance,
+                "post_standardisation_zero_norm_count": 0,
+                "post_standardisation_norm_min": float(np.min(norms)),
+                "post_standardisation_norm_max": float(np.max(norms)),
+            }
+        )
+        return self
+
+    def score(
+        self,
+        query_track_id: object,
+        candidate_ids: Iterable[object],
+        *,
+        observed_ids: Iterable[object] = (),
+    ) -> tuple[tuple[str, float], ...]:
+        """Score exactly the supplied unobserved candidates against one query."""
+
+        if not self._vectors:
+            raise BaselineFailure(
+                self.canonical_method_id, "score", "not_fitted", "fit must run first"
+            )
+        try:
+            query_id = normalise_id(query_track_id, kind="track")
+            candidates = normalise_and_sort_ids(candidate_ids, kind="track")
+            observed = set(normalise_and_sort_ids(observed_ids, kind="track"))
+        except ProtocolError as exc:
+            code = "duplicate_id" if "duplicate" in str(exc) else "invalid_id"
+            raise BaselineFailure(
+                self.canonical_method_id, "score", code, str(exc)
+            ) from exc
+        if query_id not in self._vectors:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "score",
+                "unknown_item",
+                f"unknown query track ID: {query_id}",
+            )
+        if not candidates:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "score",
+                "insufficient_output",
+                "candidate set must not be empty",
+            )
+        unknown = tuple(item_id for item_id in candidates if item_id not in self._vectors)
+        if unknown:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "score",
+                "unknown_item",
+                f"unknown candidate IDs: {unknown}",
+            )
+        forbidden = observed.union({query_id})
+        leaked = tuple(item_id for item_id in candidates if item_id in forbidden)
+        if leaked:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "score",
+                "observed_candidate",
+                f"query or observed candidate IDs: {leaked}",
+            )
+
+        query_vector = self._vectors[query_id]
+        scores = []
+        for candidate_id in candidates:
+            vector = self._vectors[candidate_id]
+            score = float(np.dot(query_vector, vector))
+            scores.append(score)
+        return rank_scores(candidates, scores)
 
 
 class ContentBasedFilter:

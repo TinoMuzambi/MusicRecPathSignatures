@@ -1,247 +1,204 @@
-"""
-Tests for the audio processing module.
+"""MR-03 contracts for fail-closed audio and 38-channel path processing."""
 
-This module contains unit tests for audio processing functions including
-audio file validation, loading, feature extraction, and multi-dimensional
-time series creation. It tests both normal cases and edge cases like
-short audio files and silent audio.
-"""
-
-import os
 import numpy as np
 import pytest
 import soundfile as sf
-from src.audio.processing import (
-    load_audio,
-    extract_features,
-    create_multidimensional_timeseries,
-    validate_audio_file,
-    extract_pitch_simple,
-    extract_loudness_safe,
-    extract_mfccs_safe,
+
+import src.audio.processing as processing
+
+
+def _failure_type():
+    return getattr(processing, "TrackProcessingError")
+
+
+def _path_inputs(frame_count=5):
+    pitch = np.linspace(100.0, 110.0, frame_count)
+    loudness = np.linspace(0.1, 0.5, frame_count)
+    mfccs = np.vstack(
+        [np.linspace(index, index + 1.0, frame_count) for index in range(20)]
+    )
+    audio = np.linspace(-0.5, 0.5, (frame_count - 1) * processing.HOP_LENGTH)
+    return pitch, loudness, mfccs, audio
+
+
+def _extra_features(frame_count=5):
+    chroma = np.vstack(
+        [np.linspace(index / 10.0, index / 10.0 + 0.1, frame_count) for index in range(12)]
+    )
+    spectral_centroid = np.linspace(1.0, 2.0, frame_count)
+    spectral_bandwidth = np.linspace(0.5, 0.9, frame_count)
+    zero_crossing_rate = np.linspace(0.0, 0.3, frame_count)
+    return {
+        "chroma": chroma,
+        "spectral_centroid": spectral_centroid,
+        "spectral_bandwidth": spectral_bandwidth,
+        "zero_crossing_rate": zero_crossing_rate,
+    }
+
+
+def test_load_audio_rejects_corrupt_and_silent_files(tmp_path):
+    corrupt = tmp_path / "corrupt.wav"
+    silent = tmp_path / "silent.wav"
+    corrupt.write_bytes(b"not audio" * 200)
+    sf.write(silent, np.zeros(22050), 22050)
+
+    with pytest.raises(_failure_type()) as corrupt_error:
+        processing.load_audio(str(corrupt), track_id="corrupt")
+    with pytest.raises(_failure_type()) as silent_error:
+        processing.load_audio(str(silent), track_id="silent")
+
+    assert corrupt_error.value.reason_code in {"invalid_audio", "unreadable_audio"}
+    assert silent_error.value.reason_code == "silent_audio"
+    assert corrupt_error.value.stage == silent_error.value.stage == "audio_load"
+
+
+def test_load_audio_distinguishes_an_unusable_path_argument():
+    with pytest.raises(_failure_type()) as caught:
+        processing.load_audio(object(), track_id="bad-path")
+
+    assert caught.value.track_id == "bad-path"
+    assert caught.value.stage == "audio_load"
+    assert caught.value.reason_code == "invalid_audio_path"
+
+
+def test_create_path_has_frozen_channel_order_time_and_finite_clipping():
+    pitch, loudness, mfccs, audio = _path_inputs()
+    mfccs[0] = 100.0
+    path = processing.create_multidimensional_timeseries(
+        pitch, loudness, _extra_features(), mfccs, 22050, audio, track_id="track-1"
+    )
+
+    assert path.shape == (pitch.size, 38)
+    assert path.dtype == np.float32
+    assert tuple(processing.SIGNATURE_CHANNELS) == (
+        "time",
+        "pitch",
+        "loudness",
+        *(f"mfcc_{index:02d}" for index in range(1, 21)),
+        *(f"chroma_{index:02d}" for index in range(1, 13)),
+        "spectral_centroid",
+        "spectral_bandwidth",
+        "zero_crossing_rate",
+    )
+    assert path[0, 0] == 0.0
+    assert path[-1, 0] == 1.0
+    assert np.all(np.diff(path[:, 0]) >= 0)
+    assert np.isfinite(path).all()
+    assert np.max(path[:, 1:]) <= 5.0
+    assert np.min(path[:, 1:]) >= -5.0
+
+
+def test_create_path_columns_match_declared_pitch_loudness_and_mfcc_order():
+    frame_count = 4
+    sample_rate = 22050
+    audio = np.linspace(
+        -0.5, 0.5, (frame_count - 1) * processing.HOP_LENGTH
+    )
+    pitch = np.linspace(0.1, 0.4, frame_count)
+    loudness = np.linspace(-0.4, -0.1, frame_count)
+    mfccs = np.vstack(
+        [np.linspace(-4.0 + index / 10.0, -3.7 + index / 10.0, frame_count)
+         for index in range(20)]
+    )
+    extra = _extra_features(frame_count)
+
+    path = processing.create_multidimensional_timeseries(
+        pitch, loudness, extra, mfccs, sample_rate, audio, track_id="ordered"
+    )
+    def standardised(values):
+        values = np.asarray(values, dtype=float)
+        return (values - np.mean(values)) / np.std(values)
+
+    np.testing.assert_allclose(path[:, 1], standardised(pitch))
+    np.testing.assert_allclose(path[:, 2], standardised(loudness))
+    for index in range(20):
+        np.testing.assert_allclose(
+            path[:, 3 + index],
+            standardised(mfccs[index]),
+        )
+    for index in range(12):
+        np.testing.assert_allclose(
+            path[:, 23 + index],
+            standardised(extra["chroma"][index]),
+        )
+    np.testing.assert_allclose(
+        path[:, 35],
+        standardised(extra["spectral_centroid"]),
+    )
+    np.testing.assert_allclose(
+        path[:, 36],
+        standardised(extra["spectral_bandwidth"]),
+    )
+    np.testing.assert_allclose(
+        path[:, 37],
+        standardised(extra["zero_crossing_rate"]),
+    )
+
+
+@pytest.mark.parametrize("field", ["pitch", "loudness", "mfccs", "audio"])
+def test_create_path_rejects_non_finite_input_before_repair(field):
+    pitch, loudness, mfccs, audio = _path_inputs()
+    values = {"pitch": pitch, "loudness": loudness, "mfccs": mfccs, "audio": audio}
+    values[field].flat[0] = np.nan
+
+    with pytest.raises(_failure_type()) as caught:
+        processing.create_multidimensional_timeseries(
+            values["pitch"],
+            values["loudness"],
+            _extra_features(),
+            values["mfccs"],
+            22050,
+            values["audio"],
+            track_id=" 009 ",
+        )
+
+    assert caught.value.track_id == "9"
+    assert caught.value.reason_code == "non_finite_feature"
+
+
+def test_create_path_rejects_missing_extra_features():
+    pitch, loudness, mfccs, audio = _path_inputs()
+
+    with pytest.raises(_failure_type()) as caught:
+        processing.create_multidimensional_timeseries(
+            pitch, loudness, None, mfccs, 22050, audio, track_id="track-1"
+        )
+
+    assert caught.value.reason_code == "invalid_feature"
+
+    extra = _extra_features()
+    del extra["chroma"]
+    with pytest.raises(_failure_type()) as caught_missing:
+        processing.create_multidimensional_timeseries(
+            pitch, loudness, extra, mfccs, 22050, audio, track_id="track-1"
+        )
+
+    assert caught_missing.value.reason_code == "missing_feature"
+
+
+@pytest.mark.parametrize(
+    ("path", "reason_code"),
+    [
+        (np.ones((38, 30)), "path_orientation"),
+        (np.ones((30, 37)), "path_channels"),
+        (np.ones((2, 38)), "path_too_short"),
+        (np.full((30, 38), np.nan), "path_non_finite"),
+    ],
 )
+def test_validate_signature_path_rejects_malformed_paths(path, reason_code):
+    validate = getattr(processing, "validate_signature_path")
+    with pytest.raises(_failure_type()) as caught:
+        validate(path, track_id="track", order=2)
+    assert caught.value.reason_code == reason_code
+    assert caught.value.track_id == "track"
+    assert caught.value.stage == "signature_path"
 
 
-@pytest.fixture(scope="module")
-def test_audio_file(tmp_path_factory):
-    """Create a synthetic audio file for testing."""
-    # Create a temporary directory
-    tmp_dir = tmp_path_factory.mktemp("data")
-    test_file = os.path.join(tmp_dir, "test_audio.wav")
-
-    # Generate a synthetic audio signal
-    sr = 22050  # Sampling rate
-    duration = 1.0  # Duration in seconds
-    t = np.linspace(0, duration, int(sr * duration))
-    signal = np.sin(2 * np.pi * 440 * t)  # 440 Hz sine wave
-
-    # Save the audio file
-    sf.write(test_file, signal, sr)
-
-    return test_file
-
-
-@pytest.fixture(scope="module")
-def test_short_audio_file(tmp_path_factory):
-    """Create a very short synthetic audio file for testing edge cases."""
-    tmp_dir = tmp_path_factory.mktemp("data")
-    test_file = os.path.join(tmp_dir, "test_short_audio.wav")
-
-    # Generate a very short synthetic audio signal
-    sr = 22050
-    duration = 0.05  # 50ms
-    t = np.linspace(0, duration, int(sr * duration))
-    signal = np.sin(2 * np.pi * 440 * t)
-
-    sf.write(test_file, signal, sr)
-    return test_file
-
-
-@pytest.fixture(scope="module")
-def test_silent_audio_file(tmp_path_factory):
-    """Create a silent audio file for testing edge cases."""
-    tmp_dir = tmp_path_factory.mktemp("data")
-    test_file = os.path.join(tmp_dir, "test_silent_audio.wav")
-
-    # Generate a silent audio signal
-    sr = 22050
-    duration = 1.0
-    signal = np.zeros(int(sr * duration))
-
-    sf.write(test_file, signal, sr)
-    return test_file
-
-
-def test_validate_audio_file(test_audio_file, test_short_audio_file):
-    """Test audio file validation functionality."""
-    # Test valid file
-    assert validate_audio_file(test_audio_file)
-
-    # Test short file (should be rejected as it's shorter than MIN_AUDIO_DURATION)
-    assert not validate_audio_file(test_short_audio_file)
-
-    # Test non-existent file
-    assert not validate_audio_file("non_existent_file.wav")
-
-    # Test directory (should fail)
-    assert not validate_audio_file(".")
-
-
-def test_load_audio(test_audio_file):
-    """Test audio loading functionality."""
-    # Test loading
-    y, sr = load_audio(test_audio_file)
-
-    # Check return types and values
-    assert isinstance(y, np.ndarray)
-    assert isinstance(sr, int)
-    assert sr == 22050  # Our target sampling rate
-    assert len(y) > 0
-
-
-def test_load_audio_edge_cases(test_short_audio_file, test_silent_audio_file):
-    """Test audio loading with edge cases."""
-    # Test short audio
-    y, sr = load_audio(test_short_audio_file)
-    assert isinstance(y, np.ndarray)
-    assert sr == 22050
-
-    # Test silent audio
-    y, sr = load_audio(test_silent_audio_file)
-    assert isinstance(y, np.ndarray)
-    assert sr == 22050
-
-
-def test_load_audio_invalid_file():
-    """Test audio loading with invalid file."""
-    # Should return dummy audio for invalid file
-    y, sr = load_audio("non_existent_file.wav")
-    assert isinstance(y, np.ndarray)
-    assert sr == 22050
-
-
-def test_extract_pitch_simple(test_audio_file):
-    """Test simple pitch extraction functionality."""
-    y, sr = load_audio(test_audio_file)
-    pitch, magnitudes = extract_pitch_simple(y, sr)
-
-    assert isinstance(pitch, np.ndarray)
-    assert isinstance(magnitudes, np.ndarray)
-    assert pitch.shape == magnitudes.shape
-    assert not np.any(np.isnan(pitch))
-
-
-def test_extract_loudness_safe(test_audio_file):
-    """Test safe loudness extraction functionality."""
-    y, _ = load_audio(test_audio_file)
-    loudness = extract_loudness_safe(y)
-
-    assert isinstance(loudness, np.ndarray)
-    assert len(loudness) > 0
-    assert not np.any(np.isnan(loudness))
-
-
-def test_extract_mfccs_safe(test_audio_file):
-    """Test safe MFCC extraction functionality."""
-    y, sr = load_audio(test_audio_file)
-    mfccs = extract_mfccs_safe(y, sr)
-
-    assert isinstance(mfccs, np.ndarray)
-    assert mfccs.shape[0] == 20  # 20 MFCC coefficients
-    assert not np.any(np.isnan(mfccs))
-
-
-def test_extract_features(test_audio_file):
-    """Test feature extraction functionality."""
-    # Load audio
-    y, sr = load_audio(test_audio_file)
-
-    # Extract features
-    pitch, loudness, tempo, mfccs = extract_features(y, sr)
-
-    # Check return types and shapes
-    assert isinstance(pitch, np.ndarray)
-    assert isinstance(loudness, np.ndarray)
-    assert isinstance(tempo, float)
-    assert isinstance(mfccs, np.ndarray)
-    assert tempo == 120.0  # Default tempo
-
-    # Check for NaN values
-    assert not np.any(np.isnan(pitch))
-    assert not np.any(np.isnan(loudness))
-    assert not np.any(np.isnan(mfccs))
-
-
-def test_extract_features_edge_cases(test_short_audio_file, test_silent_audio_file):
-    """Test feature extraction with edge cases."""
-    # Test short audio
-    y, sr = load_audio(test_short_audio_file)
-    pitch, loudness, tempo, mfccs = extract_features(y, sr)
-
-    assert isinstance(pitch, np.ndarray)
-    assert isinstance(loudness, np.ndarray)
-    assert isinstance(tempo, float)
-    assert isinstance(mfccs, np.ndarray)
-    assert not np.any(np.isnan(pitch))
-    assert not np.any(np.isnan(loudness))
-    assert not np.any(np.isnan(mfccs))
-
-    # Test silent audio
-    y, sr = load_audio(test_silent_audio_file)
-    pitch, loudness, tempo, mfccs = extract_features(y, sr)
-
-    assert isinstance(pitch, np.ndarray)
-    assert isinstance(loudness, np.ndarray)
-    assert isinstance(tempo, float)
-    assert isinstance(mfccs, np.ndarray)
-    assert not np.any(np.isnan(pitch))
-    assert not np.any(np.isnan(loudness))
-    assert not np.any(np.isnan(mfccs))
-
-
-def test_create_multidimensional_timeseries(test_audio_file):
-    """Test creation of multi-dimensional time series."""
-    # Load audio and extract features
-    y, sr = load_audio(test_audio_file)
-    pitch, loudness, tempo, mfccs = extract_features(y, sr)
-
-    # Create multi-dimensional time series
-    series = create_multidimensional_timeseries(pitch, loudness, tempo, mfccs, sr, y)
-
-    # Check return type and shape
-    assert isinstance(series, np.ndarray)
-    assert series.ndim == 2
-    assert series.shape[0] <= len(y)  # Should not be longer than input audio
-    assert series.shape[1] >= 3  # At least time, pitch, loudness
-
-    # Check data type and range
-    assert series.dtype == np.float32
-    assert not np.isnan(series).any()
-    assert not np.isinf(series).any()
-
-
-def test_create_multidimensional_timeseries_edge_cases(
-    test_short_audio_file, test_silent_audio_file
-):
-    """Test multi-dimensional time series creation with edge cases."""
-    # Test short audio
-    y, sr = load_audio(test_short_audio_file)
-    pitch, loudness, tempo, mfccs = extract_features(y, sr)
-    series = create_multidimensional_timeseries(pitch, loudness, tempo, mfccs, sr, y)
-
-    assert isinstance(series, np.ndarray)
-    assert series.ndim == 2
-    assert series.dtype == np.float32
-    assert not np.isnan(series).any()
-    assert not np.isinf(series).any()
-
-    # Test silent audio
-    y, sr = load_audio(test_silent_audio_file)
-    pitch, loudness, tempo, mfccs = extract_features(y, sr)
-    series = create_multidimensional_timeseries(pitch, loudness, tempo, mfccs, sr, y)
-
-    assert isinstance(series, np.ndarray)
-    assert series.ndim == 2
-    assert series.dtype == np.float32
-    assert not np.isnan(series).any()
-    assert not np.isinf(series).any()
+def test_validate_signature_path_accepts_json_lists_without_reshaping():
+    validate = getattr(processing, "validate_signature_path")
+    path = np.column_stack(
+        [np.linspace(0.0, 1.0, 4), np.ones((4, 37), dtype=float)]
+    )
+    validated = validate(path.tolist(), track_id="track", order=2)
+    assert validated.shape == (4, 38)
+    assert validated.dtype == np.float32

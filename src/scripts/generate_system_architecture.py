@@ -12,6 +12,8 @@ import matplotlib.patches as mpatches
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, ConnectionPatch
 import numpy as np
 
+from src.audio.feature_extraction import TRADITIONAL_CHANNEL_COUNTS
+from src.scripts.run_baseline_comparison_cli import CANONICAL_SIGNATURE_ORDER
 from src.utils.logger_config import setup_logger, configure_logging
 
 
@@ -29,6 +31,26 @@ def set_publication_style():
         "font.family": "sans-serif",
         "font.sans-serif": ["Arial", "DejaVu Sans", "Liberation Sans"],
     })
+
+
+def stage_descriptions() -> list[str]:
+    """Per-stage annotation text for the architecture diagram.
+
+    Derived from the real pipeline constants (R9 evidence audit F-10: this
+    text previously hardcoded "MFCCs (13)" and "Truncation order 1", both
+    stale relative to the actual 20-MFCC, order-2 pipeline) so the diagram
+    cannot silently drift from the code again.
+    """
+
+    return [
+        "• Resampling to 22.05 kHz\n• Peak normalisation\n• Quality checks",
+        f"• MFCCs ({TRADITIONAL_CHANNEL_COUNTS['mfccs']})\n• Spectral features\n"
+        f"• Chroma ({TRADITIONAL_CHANNEL_COUNTS['chroma']})\n• Temporal features",
+        "• Multi-dimensional\n  time series\n• Fixed length (10k)\n• Standardisation",
+        f"• esig library\n• Truncation order {CANONICAL_SIGNATURE_ORDER}\n• L2 normalisation",
+        "• Cosine similarity\n• L2-normalised\n  signatures",
+        "• Top-K ranking\n• Similarity-based\n  retrieval",
+    ]
 
 
 def create_system_architecture_diagram(output_path: Path, dpi: int = 300):
@@ -183,29 +205,52 @@ def create_system_architecture_diagram(output_path: Path, dpi: int = 300):
         zorder=4
     )
     
-    # Add component descriptions on the left side (moved lower to avoid intersection)
-    descriptions = [
-        "• Resampling to 22.05 kHz\n• Peak normalisation\n• Quality checks",
-        "• MFCCs (13)\n• Spectral features\n• Chroma (12)\n• Temporal features",
-        "• Multi-dimensional\n  time series\n• Fixed length (10k)\n• Standardisation",
-        "• esig library\n• Truncation order 1\n• L2 normalisation",
-        "• Cosine similarity\n• L2-normalised\n  signatures",
-        "• Top-K ranking\n• Similarity-based\n  retrieval"
+    # Component descriptions, each anchored directly beneath the pipeline
+    # stage box it describes, with a thin connecting line linking the two.
+    # Order matches the six processing/output stage boxes created above:
+    # preprocess, feature, path, signature (top row), then
+    # similarity, recommendation (bottom row).
+    stage_boxes = [
+        preprocess_box,
+        feature_box,
+        path_box,
+        signature_box,
+        similarity_box,
+        recommendation_box,
     ]
-    
-    desc_x = 0.2
-    desc_y_start = 2.8  # Moved lower to avoid intersection with diagram
-    desc_spacing = 0.9
-    
-    for i, desc in enumerate(descriptions):
-        y_pos = desc_y_start - i * desc_spacing
+    descriptions = stage_descriptions()
+
+    for box, desc in zip(stage_boxes, descriptions):
+        box_center_x = box['x'] + box['width'] / 2
+        box_bottom_y = box['y']
+        # Anchor point just below the stage box, and the text box a little
+        # further down so the connecting line is visible.
+        line_top_y = box_bottom_y - 0.08
+        line_bottom_y = box_bottom_y - 0.35
+        text_top_y = line_bottom_y - 0.05
+
+        # Thin connecting line from the stage box down to its caption.
+        ax.plot(
+            [box_center_x, box_center_x],
+            [line_top_y, line_bottom_y],
+            color='gray',
+            linewidth=1.0,
+            linestyle='--',
+            zorder=1,
+        )
+
         ax.text(
-            desc_x, y_pos,
+            box_center_x, text_top_y,
             desc,
-            ha='left', va='top',
-            fontsize=8,
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.9, edgecolor='gray'),
-            zorder=1  # Lower z-order so arrows appear on top
+            ha='center', va='top',
+            fontsize=7.5,
+            bbox=dict(
+                boxstyle='round,pad=0.4',
+                facecolor='white',
+                alpha=0.9,
+                edgecolor='gray',
+            ),
+            zorder=1,  # Lower z-order so arrows appear on top
         )
     
     plt.tight_layout()

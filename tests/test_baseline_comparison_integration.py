@@ -1,184 +1,212 @@
-"""
-Integration tests for baseline comparison pipeline.
+"""MR-06 integration and legacy-exclusion tests."""
 
-Tests run the full pipeline on a small dataset to verify:
-- All models generate recommendations
-- Metrics are computed correctly
-- No type mismatches occur
-- Validation functions catch real issues
-"""
+from __future__ import annotations
 
-import os
+import ast
 import json
-import tempfile
+from collections.abc import Mapping
+from pathlib import Path
+
 import pytest
 
-from src.scripts.run_baseline_comparison import (
-    run_baseline_comparison,
-    load_features,
-    create_ground_truth,
-    create_synthetic_ratings,
-)
-from src.utils.validation import (
-    validate_recommendations_match_ground_truth,
-    validate_data_quality,
+from src.scripts.run_baseline_comparison import CanonicalRunError, run_canonical_comparison
+from src.scripts.run_baseline_comparison_multiple_runs import (
+    MODEL_SEEDS,
+    aggregate_stochastic_rows,
+    expected_method_seed_keys,
 )
 
+from test_baseline_comparison import (
+    RecordingScorerBuilder,
+    identity_inputs,
+    outer_repository,
+    read_jsonl,
+    tiny_task,
+)
 
-class TestBaselineComparisonIntegration:
-    """Integration tests for the full baseline comparison pipeline."""
-    
-    def test_full_pipeline_small_dataset(self):
-        """Test full pipeline runs successfully on small dataset."""
-        # Create temporary directory
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create minimal features file
-            features = {
-                "track_1": {
-                    "mfccs": [[0.1] * 13] * 100,
-                    "chroma": [[0.1] * 12] * 100,
-                    "spectral_centroid": [0.5] * 100,
-                },
-                "track_2": {
-                    "mfccs": [[0.2] * 13] * 100,
-                    "chroma": [[0.2] * 12] * 100,
-                    "spectral_centroid": [0.6] * 100,
-                },
-                "track_3": {
-                    "mfccs": [[0.3] * 13] * 100,
-                    "chroma": [[0.3] * 12] * 100,
-                    "spectral_centroid": [0.7] * 100,
-                },
-            }
-            
-            features_file = os.path.join(tmpdir, "features.json")
-            with open(features_file, "w", encoding="utf-8") as f:
-                json.dump(features, f)
-            
-            # Create minimal tracks file
-            tracks = [
-                {"track_id": "track_1", "title": "Track 1", "genre": "Rock"},
-                {"track_id": "track_2", "title": "Track 2", "genre": "Electronic"},
-                {"track_id": "track_3", "title": "Track 3", "genre": "Rock"},
-            ]
-            
-            tracks_file = os.path.join(tmpdir, "tracks.json")
-            with open(tracks_file, "w", encoding="utf-8") as f:
-                json.dump(tracks, f)
-            
-            output_dir = os.path.join(tmpdir, "results")
-            
-            # Run pipeline with very small dataset
-            try:
-                run_baseline_comparison(
-                    features_file=features_file,
-                    tracks_json=tracks_file,
-                    output_dir=output_dir,
-                    n_users=5,
-                    test_ratio=0.4,
-                )
-                
-                # Verify outputs exist
-                results_file = os.path.join(output_dir, "baseline_comparison_results.json")
-                assert os.path.exists(results_file), "Results file should be created"
-                
-                # Load and verify results
-                with open(results_file, "r", encoding="utf-8") as f:
-                    results = json.load(f)
-                
-                # Verify all models have results
-                assert len(results) > 0, "Should have results for at least one model"
-                
-                # Verify metrics structure
-                for model_name, model_results in results.items():
-                    assert "precision" in model_results, f"{model_name} should have precision"
-                    assert "recall" in model_results, f"{model_name} should have recall"
-                    assert "per_user_precision" in model_results, (
-                        f"{model_name} should have per_user_precision"
-                    )
-                    
-            except (ValueError, KeyError, FileNotFoundError, json.JSONDecodeError, OSError) as e:
-                pytest.fail(f"Pipeline failed with error: {e}")
-    
-    def test_id_normalisation_throughout_pipeline(self):
-        """Test that IDs are normalised consistently throughout pipeline."""
-        # Create test data with mixed-type IDs
-        features = {
-            123: {"mfccs": [[0.1] * 13] * 10},
-            "456": {"mfccs": [[0.2] * 13] * 10},
-            789: {"mfccs": [[0.3] * 13] * 10},
-        }
-        
-        # Load features (should normalise)
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(features, f)
-            features_file = f.name
-        
-        try:
-            loaded_features = load_features(features_file)
-            
-            # All keys should be strings
-            assert all(isinstance(k, str) for k in loaded_features.keys()), (
-                "All feature keys should be normalised to strings"
-            )
-            
-            # Create synthetic ratings
-            ratings = create_synthetic_ratings(loaded_features, n_users=3)
-            
-            # Create ground truth (should normalise)
-            ground_truth = create_ground_truth(ratings)
-            
-            # All user IDs and item IDs should be strings
-            for user_id, items in ground_truth.items():
-                assert isinstance(user_id, str), "User IDs should be strings"
-                assert all(isinstance(item, str) for item in items), (
-                    "Item IDs should be strings"
-                )
-                
-        finally:
-            os.unlink(features_file)
-    
-    def test_validation_functions_catch_issues(self):
-        """Test that validation functions catch real issues."""
-        # Create data with type mismatch
-        recommendations = {
-            "user1": ["123", "456", "789"],  # Strings
-            "user2": [123, 456, 789],  # Integers - TYPE MISMATCH
-        }
-        ground_truth = {
-            "user1": {"123", "456"},
-            "user2": {"123", "456"},
-        }
-        
-        # Validation should detect type mismatch
-        result = validate_recommendations_match_ground_truth(
-            recommendations, ground_truth, "TestModel"
-        )
-        
-        assert not result["is_valid"], "Should detect type mismatch"
-        assert len(result["type_mismatches"]) > 0, "Should report type mismatches"
-    
-    def test_data_quality_report(self):
-        """Test data quality report generation."""
-        recommendations = {
-            "user1": ["item1", "item2"],
-            "user2": ["item3", "item4"],
-            "user3": [],  # Empty recommendations
-        }
-        ground_truth = {
-            "user1": {"item1"},
-            "user2": {"item3"},
-            "user3": {"item5"},
-        }
-        
-        quality_report = validate_data_quality(
-            recommendations, ground_truth, "TestModel"
-        )
-        
-        assert "recommendation_coverage" in quality_report
-        assert "ground_truth_coverage" in quality_report
-        assert "id_format_consistent" in quality_report
-        assert quality_report["recommendation_coverage"] < 100.0, (
-            "Should detect users with empty recommendations"
+
+class TestAccessRecord(Mapping):
+    __test__ = False
+
+    def __init__(self, value, events):
+        self.value = value
+        self.events = events
+
+    def __getitem__(self, key):
+        if key == "test":
+            self.events.append("test-read")
+        return self.value[key]
+
+    def __iter__(self):
+        return iter(self.value)
+
+    def __len__(self):
+        return len(self.value)
+
+
+def test_manifest_and_model_fit_context_precede_any_test_read(tmp_path):
+    events = []
+    task = tiny_task()
+    task["users"] = {
+        user_id: TestAccessRecord(record, events)
+        for user_id, record in task["users"].items()
+    }
+
+    class OrderedBuilder(RecordingScorerBuilder):
+        def __call__(self, context):
+            assert events == []
+            assert Path(context["run_manifest_path"]).is_file()
+            events.append("builder")
+            return super().__call__(context)
+
+    run_canonical_comparison(
+        repository_root=outer_repository(tmp_path),
+        output_directory=tmp_path / "run",
+        master_seed=2025,
+        identity_inputs=identity_inputs(),
+        task=task,
+        scorer_builder=OrderedBuilder(),
+        source_reader=lambda path: {"git_commit": "a" * 40, "dirty": False},
+    )
+    assert events[0] == "builder"
+    assert events.count("test-read") == 2
+
+
+def test_aggregates_are_rebuilt_from_jsonl_not_unsaved_rows(tmp_path):
+    def mutate_serialised_rows(staging: Path):
+        path = staging / "methods/path_signature_cosine.jsonl"
+        rows = read_jsonl(path)
+        for row in rows:
+            row["metrics"]["precision"]["5"] = 0.123
+        path.write_text(
+            "".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in rows),
+            encoding="utf-8",
         )
 
+    run_dir = run_canonical_comparison(
+        repository_root=outer_repository(tmp_path),
+        output_directory=tmp_path / "run",
+        master_seed=2025,
+        identity_inputs=identity_inputs(),
+        task=tiny_task(),
+        scorer_builder=RecordingScorerBuilder(),
+        source_reader=lambda path: {"git_commit": "a" * 40, "dirty": False},
+        rows_written_hook=mutate_serialised_rows,
+    )
+    aggregate = json.loads((run_dir / "aggregate_metrics.json").read_text(encoding="utf-8"))
+    assert aggregate["methods"]["path_signature_cosine"]["precision"]["5"] == pytest.approx(0.123)
+
+
+def test_mixed_seed_optional_availability_is_structurally_unavailable(tmp_path):
+    run_dir = run_canonical_comparison(
+        repository_root=outer_repository(tmp_path),
+        output_directory=tmp_path / "run",
+        master_seed=2025,
+        identity_inputs=identity_inputs(),
+        task=tiny_task(),
+        scorer_builder=RecordingScorerBuilder(),
+        source_reader=lambda path: {"git_commit": "a" * 40, "dirty": False},
+    )
+    rows_by_seed = {}
+    for seed in MODEL_SEEDS:
+        rows = read_jsonl(run_dir / f"methods/lightfm_warp__seed_{seed}.jsonl")
+        rows_by_seed[seed] = {row["user_id"]: row for row in rows}
+    rows_by_seed[2025]["u1"]["metrics"]["novelty"]["5"] = {
+        "status": "available", "value": 0.75
+    }
+    aggregate = aggregate_stochastic_rows(
+        rows_by_seed, catalogue_ids=tiny_task()["catalogue_ids"]
+    )
+    record = aggregate["per_user"]["u1"]["novelty"][5]
+    assert record["status"] == "unavailable"
+    assert record["reason_code"] == "seed_metric_unavailable"
+    assert "value" not in record
+
+
+def _imports_and_calls(path: Path) -> tuple[set[str], set[str]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    imports = set()
+    calls = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.add(node.module)
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                calls.add(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                calls.add(node.func.attr)
+    return imports, calls
+
+
+def test_canonical_runner_and_packager_have_no_legacy_call_graph():
+    scripts = Path(__file__).parents[1] / "src" / "scripts"
+    runner = scripts / "run_baseline_comparison.py"
+    repeated = scripts / "run_baseline_comparison_multiple_runs.py"
+    packager = scripts / "create_dissertation_package.py"
+
+    runner_imports, runner_calls = _imports_and_calls(runner)
+    package_imports, package_calls = _imports_and_calls(packager)
+    repeated_tree = ast.parse(repeated.read_text(encoding="utf-8"))
+    repeated_defs = {
+        node.name for node in repeated_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    forbidden_import_fragments = {
+        "recommendation_cv", "generate_predictions", "ablation",
+        "synthetic_users", "softmax_regression",
+    }
+    assert not any(
+        fragment in imported
+        for imported in runner_imports | package_imports
+        for fragment in forbidden_import_fragments
+    )
+    assert not ({
+        "create_synthetic_ratings", "create_legacy_feature_fallback_ratings",
+        "split_train_test", "export_users", "recommendation_cv",
+    } & (runner_calls | package_calls))
+    assert "subprocess" not in runner_imports | package_imports
+    assert "subprocess" not in {
+        alias.name
+        for node in ast.walk(repeated_tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert "aggregate_results" not in repeated_defs
+    assert "main" not in repeated_defs
+
+
+def test_exact_output_keys_are_declared_once_in_execution(tmp_path):
+    run_dir = run_canonical_comparison(
+        repository_root=outer_repository(tmp_path),
+        output_directory=tmp_path / "run",
+        master_seed=2025,
+        identity_inputs=identity_inputs(),
+        task=tiny_task(),
+        scorer_builder=RecordingScorerBuilder(),
+        source_reader=lambda path: {"git_commit": "a" * 40, "dirty": False},
+    )
+    execution = json.loads((run_dir / "execution.json").read_text(encoding="utf-8"))
+    assert tuple(execution["methods"]) == expected_method_seed_keys()
+    assert len(execution["methods"]) == len(set(execution["methods"])) == 22
+
+
+def test_incomplete_method_seed_scorer_family_fails_before_scoring(tmp_path):
+    class MissingSeedBuilder(RecordingScorerBuilder):
+        def __call__(self, context):
+            scorers = dict(super().__call__(context))
+            scorers.pop("implicit_als__seed_2029")
+            return scorers
+
+    with pytest.raises(CanonicalRunError, match="method/seed output keys mismatch"):
+        run_canonical_comparison(
+            repository_root=outer_repository(tmp_path),
+            output_directory=tmp_path / "run",
+            master_seed=2025,
+            identity_inputs=identity_inputs(),
+            task=tiny_task(),
+            scorer_builder=MissingSeedBuilder(),
+            source_reader=lambda path: {"git_commit": "a" * 40, "dirty": False},
+        )

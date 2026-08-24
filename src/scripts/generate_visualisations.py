@@ -122,7 +122,7 @@ def main():
                     track_id_to_index[track["track_id"]] = i
 
                 # Compute path signatures for each song (as in generate_predictions.py)
-                path_sig = PathSignature(order=2)
+                path_sig = PathSignature(order=1)
                 signatures = []
                 labels = []
                 skipped = 0

@@ -8,7 +8,12 @@ All tests ensure the generated users are realistic and suitable for evaluation.
 """
 
 import unittest
+import copy
+import hashlib
 import json
+import random
+import subprocess
+import sys
 import tempfile
 import shutil
 from pathlib import Path
@@ -16,8 +21,69 @@ from pathlib import Path
 # Type hints not needed for test file
 import numpy as np
 import pandas as pd
+import pytest
 
+import src.data.synthetic_users as synthetic_users
+import src.scripts.generate_synthetic_users as generation_script
 from src.data.synthetic_users import SyntheticUserGenerator, UserArchetype
+from src.evaluation.experiment_protocol import (
+    ProtocolError,
+    build_evaluation_unit,
+    split_user_interactions,
+)
+from src.utils.provenance import canonical_json_bytes
+
+
+def _canonical_tracks(count=1000):
+    genres = ("Rock", "Pop", "Electronic", "Jazz", "Classical", "Hip-Hop")
+    return [
+        {
+            "id": f"track_{index:04d}",
+            "title": f"Track {index}",
+            "artist": f"Artist {index % 37}",
+            "genre": genres[index % len(genres)],
+            "duration": 180 + (index % 120),
+        }
+        for index in range(count)
+    ]
+
+
+def _recompute_diagnostics(users, interactions, splits, track_metadata):
+    track_genres = {track["id"]: track["genre"] for track in track_metadata}
+    rating_histogram = {str(rating): 0 for rating in range(1, 6)}
+    archetype_counts = {}
+    per_archetype = {}
+    for user_id, user in users.items():
+        archetype = user["archetype_key"]
+        archetype_counts[archetype] = archetype_counts.get(archetype, 0) + 1
+        record = per_archetype.setdefault(
+            archetype,
+            {
+                "user_count": 0,
+                "interaction_count": 0,
+                "train_count": 0,
+                "validation_count": 0,
+                "test_count": 0,
+                "preferred_genre_test_count": 0,
+            },
+        )
+        record["user_count"] += 1
+        record["interaction_count"] += len(interactions[user_id])
+        for split_name in ("train", "validation", "test"):
+            record[f"{split_name}_count"] += len(splits[split_name][user_id])
+        for interaction in interactions[user_id].values():
+            rating_histogram[str(interaction["rating"])] += 1
+        record["preferred_genre_test_count"] += sum(
+            track_genres[track_id] in user["preferred_genres"]
+            for track_id in splits["test"][user_id]
+        )
+
+    return rating_histogram, archetype_counts, per_archetype
+
+
+@pytest.fixture(scope="module")
+def canonical_population():
+    return synthetic_users.build_synthetic_population(_canonical_tracks())
 
 
 class TestUserArchetype(unittest.TestCase):
@@ -203,15 +269,51 @@ class TestSyntheticUserGenerator(unittest.TestCase):
         for sample in samples:
             self.assertIn(sample, distribution.keys())
 
-        # Distribution should be approximately correct (with some randomness)
-        sample_counts = {arch: samples.count(arch) for arch in distribution.keys()}
-        total_samples = len(samples)
+    def test_sample_archetype_is_calibrated(self):
+        """Test the declared sampler at a size that detects material drift."""
+        distribution = {
+            "music_enthusiast": 0.20,
+            "genre_specialist": 0.25,
+            "casual_listener": 0.30,
+            "explorer": 0.15,
+            "mainstream_fan": 0.10,
+        }
+        sample_count = 200_000
+        samples = [
+            self.generator._sample_archetype(distribution)
+            for _ in range(sample_count)
+        ]
 
         for archetype, expected_prop in distribution.items():
-            actual_prop = sample_counts[archetype] / total_samples
-            # Allow for some variance due to randomness
-            self.assertGreater(actual_prop, expected_prop * 0.5)
-            self.assertLess(actual_prop, expected_prop * 1.5)
+            realised = samples.count(archetype) / sample_count
+            self.assertAlmostEqual(realised, expected_prop, delta=0.005)
+
+    def test_explorer_genre_count_preserves_legacy_support(self):
+        """Only the formerly undefined one-genre case may change support."""
+        explorer = self.generator.archetypes["explorer"]
+        expected_counts = {1: {1}, 2: {1}, 6: {1, 2, 3}}
+
+        for genre_count, expected in expected_counts.items():
+            tracks = [
+                {
+                    "id": f"track_{index}",
+                    "title": f"Track {index}",
+                    "artist": "Artist",
+                    "genre": f"Genre {index}",
+                    "duration": 180,
+                }
+                for index in range(genre_count)
+            ]
+            stats = self.generator._calculate_track_statistics(tracks)
+            realised = {
+                len(
+                    self.generator._generate_user_profile(
+                        index, explorer, tracks, stats
+                    )["preferred_genres"]
+                )
+                for index in range(400)
+            }
+            self.assertEqual(realised, expected)
 
     def test_generate_user_profile(self):
         """Test user profile generation."""
@@ -412,33 +514,8 @@ class TestSyntheticUserGenerator(unittest.TestCase):
         self.assertGreaterEqual(interaction_stats["max"], 0)
 
     def test_split_train_test(self):
-        """Test train/test splitting."""
-        users, interactions = self.generator.generate_users(
-            self.tracks_data, n_users=20
-        )
-
-        train_users, test_users, train_interactions, test_interactions = (
-            self.generator.split_train_test(users, interactions, test_ratio=0.2)
-        )
-
-        # Check split sizes
-        self.assertEqual(len(train_users), 16)  # 80% of 20
-        self.assertEqual(len(test_users), 4)  # 20% of 20
-        self.assertEqual(len(train_interactions), 16)
-        self.assertEqual(len(test_interactions), 4)
-
-        # Check that all users are accounted for
-        all_train_ids = set(train_users.keys())
-        all_test_ids = set(test_users.keys())
-        self.assertEqual(len(all_train_ids.intersection(all_test_ids)), 0)
-        self.assertEqual(len(all_train_ids.union(all_test_ids)), 20)
-
-        # Check that interactions match users
-        for user_id in train_users:
-            self.assertIn(user_id, train_interactions)
-
-        for user_id in test_users:
-            self.assertIn(user_id, test_interactions)
+        """The generator must not expose the invalid between-user splitter."""
+        self.assertFalse(hasattr(self.generator, "split_train_test"))
 
     def test_export_users(self):
         """Test user data export."""
@@ -597,15 +674,10 @@ class TestSyntheticUserIntegration(unittest.TestCase):
         shutil.rmtree(self.temp_dir)
 
     def test_full_pipeline(self):
-        """Test complete synthetic user generation pipeline."""
+        """Test legacy reports independently of canonical task splitting."""
         # Generate users
-        users, interactions = self.generator.generate_users(
+        self.generator.generate_users(
             self.tracks_data, n_users=50
-        )
-
-        # Split train/test
-        train_users, test_users, train_interactions, test_interactions = (
-            self.generator.split_train_test(users, interactions, test_ratio=0.2)
         )
 
         # Export data
@@ -694,3 +766,335 @@ class TestSyntheticUserIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_canonical_population_has_fixed_users_archetypes_and_configuration(
+    canonical_population,
+):
+    configuration = canonical_population["configuration"]
+    users = canonical_population["users"]
+
+    assert configuration["master_seed"] == 2025
+    assert configuration["population_size"] == 200
+    assert configuration["archetype_distribution"] == {
+        "music_enthusiast": 0.20,
+        "genre_specialist": 0.25,
+        "casual_listener": 0.30,
+        "explorer": 0.15,
+        "mainstream_fan": 0.10,
+    }
+    assert len(users) == 200
+    assert {user["archetype_key"] for user in users.values()} == set(
+        configuration["archetype_distribution"]
+    )
+    assert configuration["preference_inputs"] == [
+        "archetype rules",
+        "genre",
+        "novelty",
+        "popularity",
+    ]
+    assert configuration["raw_audio_features_used"] is False
+    assert configuration["observed_human_behaviour"] is False
+
+
+def test_canonical_generation_uses_local_rng_and_is_input_order_invariant():
+    tracks = _canonical_tracks()
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+
+    first = synthetic_users.build_synthetic_population(tracks, master_seed=2025)
+    second = synthetic_users.build_synthetic_population(
+        list(reversed(tracks)), master_seed=2025
+    )
+
+    assert canonical_json_bytes(first) == canonical_json_bytes(second)
+    assert random.getstate() == python_state
+    current_numpy_state = np.random.get_state()
+    assert current_numpy_state[0] == numpy_state[0]
+    assert np.array_equal(current_numpy_state[1], numpy_state[1])
+    assert current_numpy_state[2:] == numpy_state[2:]
+
+
+def test_canonical_generation_is_fresh_process_reproducible_and_seeded():
+    code = """
+import hashlib
+from src.data.synthetic_users import build_synthetic_population
+from src.utils.provenance import canonical_json_bytes
+genres = ('Rock', 'Pop', 'Electronic', 'Jazz', 'Classical', 'Hip-Hop')
+tracks = [
+    {
+        'id': f'track_{index:04d}',
+        'title': f'Track {index}',
+        'artist': f'Artist {index % 37}',
+        'genre': genres[index % len(genres)],
+        'duration': 180 + (index % 120),
+    }
+    for index in range(1000)
+]
+population = build_synthetic_population(tracks, master_seed=MASTER_SEED)
+print(hashlib.sha256(canonical_json_bytes(population)).hexdigest())
+"""
+
+    def digest(seed):
+        completed = subprocess.run(
+            [sys.executable, "-c", code.replace("MASTER_SEED", str(seed))],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout.strip().splitlines()[-1]
+
+    first = digest(2025)
+    assert first == digest(2025)
+    assert first != digest(2026)
+
+
+def test_canonical_splits_are_within_user_and_match_mr01_oracle(
+    canonical_population,
+):
+    users = canonical_population["users"]
+    interactions = canonical_population["interactions"]
+    splits = canonical_population["splits"]
+    catalogue = canonical_population["configuration"]["ordered_track_ids"]
+
+    assert set(users) == set(interactions)
+    assert set(users) == set(splits["train"])
+    assert set(users) == set(splits["validation"])
+    assert set(users) == set(splits["test"])
+
+    for user_id in sorted(users):
+        expected = split_user_interactions(
+            user_id, interactions[user_id], master_seed=2025
+        )
+        train_ids = tuple(splits["train"][user_id])
+        validation_ids = tuple(splits["validation"][user_id])
+        test_ids = tuple(splits["test"][user_id])
+        assert train_ids == expected.train
+        assert validation_ids == expected.validation
+        assert test_ids == expected.test
+        assert set(train_ids).isdisjoint(validation_ids)
+        assert set(train_ids).isdisjoint(test_ids)
+        assert set(validation_ids).isdisjoint(test_ids)
+        assert set(train_ids) | set(validation_ids) | set(test_ids) == set(
+            interactions[user_id]
+        )
+
+        observed_ids = (*train_ids, *validation_ids)
+        expected_candidate_count = len(set(catalogue).difference(observed_ids))
+        assert expected_candidate_count >= 10
+        unit = build_evaluation_unit(
+            catalogue_ids=catalogue,
+            observed_ids=observed_ids,
+            test_ids=test_ids,
+        )
+        assert len(unit.candidate_ids) == expected_candidate_count
+        assert unit.relevance_ids
+
+
+def test_empty_per_user_partition_fails_the_population():
+    with pytest.raises(ProtocolError, match="empty"):
+        synthetic_users.build_synthetic_population(_canonical_tracks(6))
+
+
+def test_diagnostics_are_recomputable_without_a_rating_threshold(
+    canonical_population,
+):
+    users = canonical_population["users"]
+    interactions = canonical_population["interactions"]
+    splits = canonical_population["splits"]
+    diagnostics = canonical_population["diagnostics"]
+
+    rating_histogram, archetype_counts, per_archetype = _recompute_diagnostics(
+        users,
+        interactions,
+        splits,
+        canonical_population["configuration"]["track_metadata"],
+    )
+
+    assert diagnostics["rating_histogram"] == rating_histogram
+    assert diagnostics["realised_archetype_counts"] == archetype_counts
+    for archetype, recomputed in per_archetype.items():
+        saved = diagnostics["per_archetype"][archetype]
+        for field, value in recomputed.items():
+            assert saved[field] == value
+        assert saved["preferred_genre_test_share"] == pytest.approx(
+            recomputed["preferred_genre_test_count"] / recomputed["test_count"]
+        )
+
+    specialists = [
+        user for user in users.values() if user["archetype_key"] == "genre_specialist"
+    ]
+    assert specialists
+    assert all(user["preferred_genres"] == ["Rock"] for user in specialists)
+    assert diagnostics["all_genre_specialists_prefer_rock"] is True
+
+    for user_id in users:
+        split_union = set().union(
+            splits["train"][user_id],
+            splits["validation"][user_id],
+            splits["test"][user_id],
+        )
+        assert split_union == set(interactions[user_id])
+
+
+def test_canonical_track_metadata_checksum_is_order_invariant(
+    canonical_population,
+):
+    configuration = canonical_population["configuration"]
+    assert len(configuration["track_metadata_sha256"]) == 64
+    assert configuration["ordered_track_ids"] == sorted(
+        configuration["ordered_track_ids"]
+    )
+    assert configuration["track_metadata_sha256"] == hashlib.sha256(
+        canonical_json_bytes(configuration["track_metadata"])
+    ).hexdigest()
+
+
+def test_conflicting_track_id_aliases_fail_as_an_ambiguous_join():
+    tracks = _canonical_tracks(6)
+    tracks[0]["track_id"] = "different_track"
+
+    with pytest.raises(ProtocolError, match="conflicting track ID fields"):
+        synthetic_users.build_synthetic_population(tracks)
+
+
+def test_diagnostics_join_genres_to_manifest_not_copied_interactions(
+    canonical_population,
+):
+    tampered_interactions = copy.deepcopy(canonical_population["interactions"])
+    first_user = sorted(tampered_interactions)[0]
+    first_track = next(iter(canonical_population["splits"]["test"][first_user]))
+    tampered_interactions[first_user][first_track]["genre"] = "Tampered genre"
+
+    diagnostics = synthetic_users._population_diagnostics(
+        users=canonical_population["users"],
+        interactions=tampered_interactions,
+        splits=canonical_population["splits"],
+        track_metadata=canonical_population["configuration"]["track_metadata"],
+    )
+    assert diagnostics == canonical_population["diagnostics"]
+
+
+def test_direct_interaction_generation_normalises_or_rejects_track_ids():
+    generator = SyntheticUserGenerator(random_seed=2025)
+    profile = {
+        "engagement_level": 1.0,
+        "interaction_rate": 1.0,
+        "preferred_genres": [],
+        "popularity_bias": 0.5,
+        "diversity_preference": 0.5,
+        "novelty_seeking": 0.5,
+    }
+    zero_id_track = {
+        "id": 0,
+        "title": "Zero",
+        "artist": "Artist",
+        "genre": "Rock",
+        "duration": 180,
+    }
+    stats = generator._calculate_track_statistics([zero_id_track])
+    assert set(
+        generator._generate_user_interactions(profile, [zero_id_track], stats)
+    ) == {"0"}
+
+    invalid_track = dict(zero_id_track, id="")
+    invalid_stats = generator._calculate_track_statistics([invalid_track])
+    with pytest.raises(ProtocolError, match="must not be empty"):
+        generator._generate_user_interactions(profile, [invalid_track], invalid_stats)
+
+
+def test_canonical_export_round_trip_and_collision_guards(
+    canonical_population, tmp_path, capsys
+):
+    generation_script.export_user_data(canonical_population, str(tmp_path))
+    expected_files = {
+        "canonical_synthetic_users.json",
+        "canonical_user_interactions.json",
+        "canonical_train_interactions.json",
+        "canonical_validation_interactions.json",
+        "canonical_test_interactions.json",
+        "canonical_synthetic_user_configuration.json",
+        "canonical_synthetic_user_diagnostics.json",
+    }
+    assert {path.name for path in tmp_path.iterdir()} == expected_files
+
+    def load(name):
+        return json.loads((tmp_path / name).read_text(encoding="utf-8"))
+
+    configuration = load("canonical_synthetic_user_configuration.json")
+    users_payload = load("canonical_synthetic_users.json")
+    interactions_payload = load("canonical_user_interactions.json")
+    diagnostics_payload = load("canonical_synthetic_user_diagnostics.json")
+    for payload, record_type in (
+        (users_payload, "synthetic_users"),
+        (interactions_payload, "synthetic_user_interactions"),
+        (diagnostics_payload, "synthetic_user_diagnostics"),
+    ):
+        assert payload["schema_version"] == 1
+        assert payload["master_seed"] == 2025
+        assert payload["record_type"] == record_type
+    assert configuration["schema_version"] == 1
+    assert configuration["master_seed"] == 2025
+    assert configuration["record_type"] == "synthetic_user_configuration"
+    splits = {}
+    for split_name in ("train", "validation", "test"):
+        payload = load(f"canonical_{split_name}_interactions.json")
+        assert payload["schema_version"] == 1
+        assert payload["master_seed"] == 2025
+        assert payload["record_type"] == "within_user_interaction_split"
+        assert payload["split_name"] == split_name
+        assert payload["split_rule"] == configuration["split_rule"]
+        splits[split_name] = payload["interactions"]
+
+    assert users_payload["users"] == canonical_population["users"]
+    assert interactions_payload["interactions"] == canonical_population["interactions"]
+    recomputed = _recompute_diagnostics(
+        users_payload["users"],
+        interactions_payload["interactions"],
+        splits,
+        configuration["track_metadata"],
+    )
+    assert diagnostics_payload["diagnostics"]["rating_histogram"] == recomputed[0]
+    assert (
+        diagnostics_payload["diagnostics"]["realised_archetype_counts"]
+        == recomputed[1]
+    )
+    for archetype, counts in recomputed[2].items():
+        saved = diagnostics_payload["diagnostics"]["per_archetype"][archetype]
+        for field, value in counts.items():
+            assert saved[field] == value
+        assert saved["preferred_genre_test_share"] == pytest.approx(
+            counts["preferred_genre_test_count"] / counts["test_count"]
+        )
+
+    generation_script.print_summary(canonical_population, str(tmp_path))
+    assert "All users retained" in capsys.readouterr().out
+
+    with pytest.raises(FileExistsError, match="canonical synthetic-user"):
+        generation_script.export_user_data(canonical_population, str(tmp_path))
+
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    (legacy_dir / "train_interactions.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="legacy synthetic-user"):
+        generation_script.export_user_data(canonical_population, str(legacy_dir))
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--n-users", "199"],
+        ["--random-seed", "2026"],
+        ["--test-ratio", "0.20"],
+        ["--enthusiast-ratio", "0.30"],
+    ],
+)
+def test_noncanonical_cli_values_are_rejected(extra_args):
+    required = [
+        "--tracks-json",
+        "tracks.json",
+        "--output-dir",
+        "output",
+    ]
+    with pytest.raises(SystemExit):
+        generation_script.parse_args([*required, *extra_args])

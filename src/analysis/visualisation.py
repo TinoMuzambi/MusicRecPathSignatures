@@ -68,8 +68,14 @@ def visualise_signatures(
             principal_components[:, 0], principal_components[:, 1], alpha=0.6, s=12
         )
     else:
-        unique_labels = list(set(labels))
-        palette = sns.color_palette(n_colors=len(unique_labels))
+        unique_labels = sorted(set(labels), key=str)
+        # `sns.color_palette()` with no explicit palette name falls back to
+        # the current default (10 colours), which repeats once there are
+        # more categories than that -- with 16 genres several pairs would
+        # end up sharing a colour. "husl" generates as many perceptually
+        # distinct hues as requested, so it stays distinguishable for any
+        # number of categories.
+        palette = sns.color_palette("husl", n_colors=len(unique_labels))
         for label, color in zip(unique_labels, palette):
             mask = [l == label for l in labels]
             plt.scatter(
@@ -124,6 +130,12 @@ def plot_similarity_matrix(
     _set_style()
     fig, ax = plt.subplots(figsize=(8, 7))
     show_labels = len(song_names) <= 60
+    # With many songs, per-cell gridlines are wider (in rendered pixels)
+    # than the cells themselves, so a fixed non-zero linewidth washes the
+    # whole heatmap out to solid white. Only draw gridlines when there are
+    # few enough cells for them to remain thinner than a cell.
+    n_songs = sim_matrix.shape[0]
+    use_gridlines = n_songs <= 60
     sns.heatmap(
         sim_matrix,
         xticklabels=song_names if show_labels else False,
@@ -132,8 +144,9 @@ def plot_similarity_matrix(
         annot=False,
         cbar_kws={"shrink": 0.8},
         ax=ax,
-        linewidths=0.5,
-        linecolor="white",
+        linewidths=0.5 if use_gridlines else 0,
+        linecolor="white" if use_gridlines else None,
+        rasterized=not use_gridlines,
     )
     ax.set_title(title)
     if show_labels:
@@ -170,8 +183,17 @@ def plot_confusion_matrix(
     y_pred: list,
     class_names: list = None,
     save_path: str = None,
-    title: str = "Confusion Matrix",
+    title: str = "Confusion Matrix (Full Catalogue, Diagnostic)",
 ) -> None:
+    """Plot a confusion matrix over the full track catalogue.
+
+    This is a separate, uncited diagnostic view (over the full ~4,000-track
+    catalogue) from the LaTeX-cited ``results/evaluation/confusion_matrix.png``
+    (a held-out evaluation over a smaller sample; see
+    ``src.evaluation.classification_metrics.plot_confusion_matrix``). The two
+    have genuinely different N and accuracy and must not share a bare,
+    undifferentiated "Confusion Matrix" title (R9 evidence audit F-08).
+    """
     if not y_true or not y_pred:
         return
     if class_names is None:
@@ -215,8 +237,14 @@ def plot_feature_embedding(
     labels: list = None,
     method: str = "pca",
     save_path: str = None,
-    title: str = "Feature Embedding Visualisation",
+    title: Optional[str] = None,
 ) -> None:
+    """Plot a 2D PCA/t-SNE embedding of feature vectors.
+
+    This is the dissertation-cited Figure 3.2 (``feature_embedding_tsne.png``);
+    its LaTeX caption already describes it, so no internal title is drawn
+    unless the caller explicitly requests one (examiner G-05/D-13).
+    """
     if features.size == 0:
         return
     _set_style()
@@ -235,8 +263,12 @@ def plot_feature_embedding(
     if labels is None:
         plt.scatter(embedding[:, 0], embedding[:, 1], alpha=0.7, s=12)
     else:
-        unique_labels = list(set(labels))
-        palette = sns.color_palette(n_colors=len(unique_labels))
+        unique_labels = sorted(set(labels), key=str)
+        # See plot_path_signatures for why "husl" is used instead of the
+        # default palette: the default only has 10 distinct colours, so it
+        # silently repeats (and visually merges) categories beyond that,
+        # e.g. with 16 genres.
+        palette = sns.color_palette("husl", n_colors=len(unique_labels))
         for label, color in zip(unique_labels, palette):
             mask = [l == label for l in labels]
             plt.scatter(
@@ -255,7 +287,8 @@ def plot_feature_embedding(
             loc="upper left",
             borderaxespad=0.0,
         )
-    plt.title(title)
+    if title:
+        plt.title(title)
     plt.xlabel("Component 1")
     plt.ylabel("Component 2")
     plt.grid(True, alpha=0.3)

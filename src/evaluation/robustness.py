@@ -41,19 +41,34 @@ def bootstrap_ci(
     agg: Callable[[np.ndarray], float] = np.mean,
 ) -> Dict[str, Any]:
     """Compute bootstrap confidence interval for an aggregate over data."""
+    if isinstance(n_bootstrap, bool) or not isinstance(n_bootstrap, int) or n_bootstrap <= 0:
+        raise ValueError("n_bootstrap must be a positive integer")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an integer")
+    if isinstance(ci, bool) or not isinstance(ci, (int, float)) or not 0.0 < float(ci) < 1.0:
+        raise ValueError("ci must be strictly between zero and one")
+    try:
+        arr = np.asarray(data, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError("bootstrap data must be numeric") from error
+    if arr.ndim != 1 or arr.size == 0 or not np.isfinite(arr).all():
+        raise ValueError("bootstrap data must be a non-empty finite vector")
     rng = np.random.default_rng(seed)
-    arr = np.asarray(data, dtype=float)
-    if arr.size == 0:
-        return {"estimate": 0.0, "ci_low": 0.0, "ci_high": 0.0}
     boots = []
     for _ in range(n_bootstrap):
         sample = rng.choice(arr, size=arr.size, replace=True)
-        boots.append(agg(sample))
-    boots = np.asarray(boots)
+        value = float(agg(sample))
+        if not np.isfinite(value):
+            raise ValueError("bootstrap aggregate returned a non-finite value")
+        boots.append(value)
+    boots = np.asarray(boots, dtype=np.float64)
     alpha = (1.0 - ci) / 2.0
     low = np.quantile(boots, alpha)
     high = np.quantile(boots, 1.0 - alpha)
-    return _to_native({"estimate": float(agg(arr)), "ci_low": low, "ci_high": high})
+    estimate = float(agg(arr))
+    if not np.isfinite(estimate):
+        raise ValueError("bootstrap aggregate returned a non-finite estimate")
+    return _to_native({"estimate": estimate, "ci_low": low, "ci_high": high})
 
 
 def sensitivity_analysis(
@@ -65,49 +80,56 @@ def sensitivity_analysis(
 
     metric_fn should accept (size, seed) and return a float metric.
     """
+    if (
+        not isinstance(sizes, list)
+        or not sizes
+        or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in sizes)
+        or len(set(sizes)) != len(sizes)
+    ):
+        raise ValueError("sizes must be distinct positive integers")
+    if (
+        not isinstance(seeds, list)
+        or not seeds
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in seeds)
+        or len(set(seeds)) != len(seeds)
+    ):
+        raise ValueError("seeds must be distinct integers")
     results: Dict[str, Dict[str, float]] = {}
     for size in sizes:
         size_key = str(size)
         results[size_key] = {}
         for seed in seeds:
-            try:
-                value = float(metric_fn(size, seed))
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.warning(
-                    "sensitivity metric_fn failed for size=%s seed=%s: %s",
-                    size,
-                    seed,
-                    exc,
-                )
-                value = float("nan")
+            value = float(metric_fn(size, seed))
+            if not np.isfinite(value):
+                raise ValueError("sensitivity metric returned a non-finite value")
             results[size_key][str(seed)] = value
     return _to_native({"sizes": sizes, "seeds": seeds, "values": results})
 
 
 def stability_metrics(scores_per_run: List[List[float]] | np.ndarray) -> Dict[str, Any]:
     """Compute stability across runs: mean, std, variance per run and overall."""
-    arr = [np.asarray(run, dtype=float) for run in scores_per_run]
+    if len(scores_per_run) == 0:
+        raise ValueError("scores_per_run must not be empty")
+    try:
+        arr = [np.asarray(run, dtype=np.float64) for run in scores_per_run]
+    except (TypeError, ValueError) as error:
+        raise ValueError("stability scores must be numeric") from error
+    if any(run.ndim != 1 or run.size == 0 or not np.isfinite(run).all() for run in arr):
+        raise ValueError("every stability run must be a non-empty finite vector")
     run_stats = []
     for run in arr:
-        if run.size == 0:
-            run_stats.append({"mean": 0.0, "std": 0.0, "var": 0.0})
-        else:
-            run_stats.append(
-                {
-                    "mean": float(np.mean(run)),
-                    "std": float(np.std(run)),
-                    "var": float(np.var(run)),
-                }
-            )
-    all_values = (
-        np.concatenate([r for r in arr if r.size > 0])
-        if any(r.size > 0 for r in arr)
-        else np.array([])
-    )
+        run_stats.append(
+            {
+                "mean": float(np.mean(run)),
+                "std": float(np.std(run)),
+                "var": float(np.var(run)),
+            }
+        )
+    all_values = np.concatenate(arr)
     overall = {
-        "mean": float(np.mean(all_values)) if all_values.size else 0.0,
-        "std": float(np.std(all_values)) if all_values.size else 0.0,
-        "var": float(np.var(all_values)) if all_values.size else 0.0,
+        "mean": float(np.mean(all_values)),
+        "std": float(np.std(all_values)),
+        "var": float(np.var(all_values)),
     }
     return _to_native({"per_run": run_stats, "overall": overall})
 
@@ -117,10 +139,15 @@ def error_analysis_by_group(
     user_to_group: Dict[str, str],
 ) -> Dict[str, Any]:
     """Aggregate per-user metric by group key (e.g., genre), returning stats per group."""
+    if not per_user_metric or set(per_user_metric) != set(user_to_group):
+        raise ValueError("metric and group mappings must contain the same non-empty user set")
     group_to_values: Dict[str, List[float]] = {}
     for user, value in per_user_metric.items():
-        group = user_to_group.get(user, "Unknown")
-        group_to_values.setdefault(group, []).append(float(value))
+        group = user_to_group[user]
+        numeric = float(value)
+        if not isinstance(group, str) or not group.strip() or not np.isfinite(numeric):
+            raise ValueError("groups must be non-empty strings and metrics must be finite")
+        group_to_values.setdefault(group.strip(), []).append(numeric)
     group_stats: Dict[str, Dict[str, float]] = {}
     for group, vals in group_to_values.items():
         arr = np.asarray(vals, dtype=float)

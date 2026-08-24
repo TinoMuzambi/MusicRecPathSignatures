@@ -6,7 +6,22 @@ This module implements matrix factorisation methods using LightFM for
 reliable, industry-standard baseline methods.
 """
 
+from collections.abc import Callable, Iterable, Mapping
+from numbers import Integral, Real
 from typing import Dict, List, Tuple
+
+from .baseline_contract import (
+    LIGHTFM_BASE_CONFIG,
+    LIGHTFM_SEEDS,
+    BaselineFailure,
+    BinaryInteractionData,
+    blend_score_vectors,
+    build_binary_interaction_matrix,
+    rank_scores,
+    normalise_lightfm_configuration,
+    validate_collaborative_request,
+)
+
 import numpy as np
 
 try:
@@ -15,10 +30,252 @@ try:
 
     LIGHTFM_AVAILABLE = True
 except Exception:
+    LightFM = None
+    Dataset = None
     LIGHTFM_AVAILABLE = False
 from ..utils.logger_config import setup_logger
 
 logger = setup_logger("matrix_factorisation")
+
+
+def _canonical_lightfm_factory() -> Callable[..., object]:
+    if not LIGHTFM_AVAILABLE or LightFM is None:
+        raise BaselineFailure(
+            "lightfm",
+            "dependency",
+            "dependency_unavailable",
+            "LightFM 1.17 is required for the canonical adapter",
+        )
+    return LightFM
+
+
+class _CanonicalLightFMRecommender:
+    """One fail-closed LightFM optimiser at one declared seed."""
+
+    canonical_method_id = ""
+    loss = ""
+
+    def __init__(
+        self,
+        *,
+        random_state: int,
+        model_factory: Callable[..., object] | None = None,
+        configuration: Mapping[str, object] | None = None,
+    ) -> None:
+        if (
+            isinstance(random_state, bool)
+            or not isinstance(random_state, Integral)
+            or int(random_state) not in LIGHTFM_SEEDS
+        ):
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "configuration",
+                "invalid_seed",
+                f"seed must be one of {LIGHTFM_SEEDS}",
+            )
+        self.random_state = int(random_state)
+        self._model_factory = model_factory
+        self.configuration = normalise_lightfm_configuration(
+            configuration, loss=self.loss
+        )
+        self.data: BinaryInteractionData | None = None
+        self.model = None
+
+    def fit(
+        self,
+        interactions: Mapping[object, Mapping[object, object]],
+        *,
+        catalogue_ids: Iterable[object],
+    ) -> "_CanonicalLightFMRecommender":
+        self.data = build_binary_interaction_matrix(
+            interactions, catalogue_ids=catalogue_ids
+        )
+        factory = self._model_factory
+        if factory is None:
+            factory = _canonical_lightfm_factory()
+        constructor = {
+            **LIGHTFM_BASE_CONFIG,
+            **{key: value for key, value in self.configuration.items() if key != "epochs"},
+            "loss": self.loss,
+            "random_state": self.random_state,
+        }
+        try:
+            self.model = factory(**constructor)
+            self.model.fit(
+                self.data.matrix,
+                epochs=int(self.configuration["epochs"]),
+                num_threads=1,
+                verbose=False,
+            )
+        except BaselineFailure:
+            raise
+        except Exception as exc:
+            self.model = None
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "fit",
+                "fit_failed",
+                f"LightFM fit failed: {exc}",
+            ) from exc
+        return self
+
+    def _score_vector(
+        self, user_id: object, candidate_ids: Iterable[object]
+    ) -> tuple[tuple[str, ...], np.ndarray]:
+        if self.data is None or self.model is None:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "score",
+                "not_fitted",
+                "fit must complete before scoring",
+            )
+        canonical_user, candidates, item_indices = validate_collaborative_request(
+            self.data,
+            user_id,
+            candidate_ids,
+            method_id=self.canonical_method_id,
+        )
+        try:
+            raw_scores = self.model.predict(
+                self.data.user_map[canonical_user],
+                item_indices,
+                num_threads=1,
+            )
+            scores = np.asarray(raw_scores, dtype=np.float64)
+        except Exception as exc:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "predict",
+                "predict_failed",
+                f"LightFM prediction failed: {exc}",
+            ) from exc
+        if scores.ndim != 1 or scores.shape[0] != len(candidates):
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "predict",
+                "score_length",
+                "LightFM returned a score vector with the wrong length",
+            )
+        if not np.isfinite(scores).all():
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "predict",
+                "non_finite_score",
+                "LightFM returned a non-finite score",
+            )
+        return candidates, scores
+
+    def score(
+        self, user_id: object, candidate_ids: Iterable[object]
+    ) -> tuple[tuple[str, float], ...]:
+        candidates, scores = self._score_vector(user_id, candidate_ids)
+        return rank_scores(candidates, scores)
+
+
+class LightFMWARPRecommender(_CanonicalLightFMRecommender):
+    """Canonical LightFM WARP baseline."""
+
+    canonical_method_id = "lightfm_warp"
+    loss = "warp"
+
+
+class LightFMWARPKOSRecommender(_CanonicalLightFMRecommender):
+    """Canonical LightFM WARP-kOS baseline."""
+
+    canonical_method_id = "lightfm_warp_kos"
+    loss = "warp-kos"
+
+
+class LightFMLatentBlendRecommender:
+    """Validation-selected blend of WARP and WARP-kOS score vectors."""
+
+    canonical_method_id = "lightfm_latent_blend"
+
+    def __init__(
+        self,
+        *,
+        random_state: int,
+        model_factory: Callable[..., object] | None = None,
+        warp_configuration: Mapping[str, object] | None = None,
+        kos_configuration: Mapping[str, object] | None = None,
+        warp_weight: float = 0.7,
+    ) -> None:
+        if (
+            isinstance(warp_weight, bool)
+            or not isinstance(warp_weight, Real)
+            or warp_weight not in {0.3, 0.5, 0.7}
+        ):
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "configuration",
+                "invalid_weight",
+                "WARP weight must be one of 0.3, 0.5, or 0.7",
+            )
+        self.warp_weight = float(warp_weight)
+        self.warp = LightFMWARPRecommender(
+            random_state=random_state,
+            model_factory=model_factory,
+            configuration=warp_configuration,
+        )
+        self.warp_kos = LightFMWARPKOSRecommender(
+            random_state=random_state,
+            model_factory=model_factory,
+            configuration=kos_configuration,
+        )
+
+    def fit(
+        self,
+        interactions: Mapping[object, Mapping[object, object]],
+        *,
+        catalogue_ids: Iterable[object],
+    ) -> "LightFMLatentBlendRecommender":
+        try:
+            self.warp.fit(interactions, catalogue_ids=catalogue_ids)
+            self.warp_kos.fit(interactions, catalogue_ids=catalogue_ids)
+        except BaselineFailure as exc:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "fit",
+                "component_failed",
+                str(exc),
+            ) from exc
+        return self
+
+    def score(
+        self, user_id: object, candidate_ids: Iterable[object]
+    ) -> tuple[tuple[str, float], ...]:
+        requested = tuple(candidate_ids)
+        try:
+            candidates, warp_scores = self.warp._score_vector(user_id, requested)
+            kos_candidates, kos_scores = self.warp_kos._score_vector(
+                user_id, requested
+            )
+        except BaselineFailure as exc:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "score",
+                "component_failed",
+                str(exc),
+            ) from exc
+        if candidates != kos_candidates:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "score",
+                "candidate_mismatch",
+                "blend components did not score the identical candidate IDs",
+            )
+        try:
+            scores = blend_score_vectors(
+                warp_scores, kos_scores, first_weight=self.warp_weight
+            )
+        except BaselineFailure as exc:
+            raise BaselineFailure(
+                self.canonical_method_id,
+                "score",
+                exc.reason_code,
+                exc.reason,
+            ) from exc
+        return rank_scores(candidates, scores)
 
 
 class SVDRecommender:

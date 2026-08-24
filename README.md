@@ -1,16 +1,16 @@
 # Music Recommendation System with Path Signatures
 
-A comprehensive music recommendation system that combines **novel path signature analysis** with **established recommendation methods** using LightFM and Implicit libraries. This MSc project demonstrates the effectiveness of path signatures for music recommendation through rigorous comparison with traditional approaches.
+A comprehensive music recommendation system that combines **novel path signature analysis** with **established recommendation methods** using LightFM and Implicit libraries. This MSc project evaluates path signatures for music recommendation through controlled comparison with traditional approaches.
 
 ## Key Features
 
 ### **Novel Path Signature Method**
 
 - **Path signature computation** for capturing musical structure using the esig library
-- **Genre-based musical categories** using actual music metadata instead of arbitrary clustering
-- **Optimised similarity computation** with focus on path signatures (80% weight)
+- **Configurable musical categories** using either genre labels or deterministic pseudo-category clustering
+- **Explicit similarity computation** with weights of 70%, 20%, and 10% for the three composite components
 - **Temperature scaling** for adjustable recommendation sensitivity
-- **Default configuration**: Order 1 (best performance/latency trade-off), with ablations at orders 2–4
+- **Canonical comparison configuration**: Order 3, with exploratory ablations at feasible orders 1–3
 
 ### **Traditional Baseline Methods**
 
@@ -209,83 +209,47 @@ For testing or development, you can use the smaller FMA Small dataset:
 
 ## Complete Pipeline (One-Click Solution)
 
-The easiest way to run the entire workflow is using the complete pipeline script. This script executes all steps from track processing to dissertation package generation:
+The final dissertation release has one fail-closed entry point. Run it from a
+clean ordinary outer Git clone, with a new output directory outside the source
+and raw-data trees:
 
 ```bash
-# Run complete pipeline with default settings
-./run_complete_pipeline.sh
+./code/run_complete_pipeline.sh \
+  --run-root /absolute/new/release-root \
+  --tracks-csv /absolute/data/fma_metadata/tracks.csv \
+  --audio-root /absolute/data/fma_medium \
+  --repository-root /absolute/outer-repository \
+  --n-jobs 4
 ```
 
 ### **Pipeline Steps**
 
-The script executes 13 steps in sequence:
+The script executes nine mandatory stages in sequence:
 
-1. **Data Preparation**: Track selection and audio feature extraction (`robust_track_processing.py`)
-2. **Exploratory Data Analysis (EDA)**: Comprehensive dataset analysis (`generate_eda_analysis.py`)
-3. **Path Signature Computation**: Compute similarity matrices (`compute_similarity.py`)
-4. **Baseline Comparison**: Compare all recommendation methods (`run_baseline_comparison.py`)
-5. **Ablation Studies**: Parameter sensitivity analysis (optional, `run_ablation_studies.py`)
-6. **Evaluation Suite**: Comprehensive evaluation metrics (`run_evaluation_suite.py`)
-7. **Prediction Generation**: Generate genre predictions (`generate_predictions.py`)
-8. **Visualisation Generation**: Create all plots and charts (`generate_visualisations.py`)
-9. **Dissertation Figures**: Generate publication-quality figures (`generate_dissertation_figures.py`)
-10. **Sync Figures**: Copy figures to LaTeX directory (`sync_figures.py`)
-11. **Synthetic Users**: Generate synthetic user data for evaluation (optional, `generate_synthetic_users.py`)
-12. **Robustness Analysis**: Bootstrap and sensitivity analysis (optional, `run_robustness_analysis.py`)
-13. **Dissertation Package**: Package all results for LaTeX (`create_dissertation_package.py`)
-
-### **Pipeline Options**
-
-```bash
-# Skip optional steps (ablation studies, synthetic users, robustness analysis)
-./run_complete_pipeline.sh --skip-optional
-
-# Resume from a specific step (useful if previous steps already completed)
-./run_complete_pipeline.sh --start-from-step 3
-
-# Skip specific steps
-./run_complete_pipeline.sh --skip-step 4 --skip-step 10
-
-# Combine options
-./run_complete_pipeline.sh --skip-optional --start-from-step 5
-```
-
-### **Configuration**
-
-Customise the pipeline using environment variables:
-
-```bash
-# Custom track count and seed
-N_TRACKS=2000 SEED=2025 ./run_complete_pipeline.sh
-
-# Custom paths and settings
-TRACKS_CSV=./data/fma_metadata/tracks.csv \
-AUDIO_ROOT=./data/fma_medium \
-OUTPUT_DIR=./data/processed_tracks \
-SIMILARITY_MATRIX=./data/similarity_matrix.npz \
-SIGNATURE_ORDER=2 \
-LOG_LEVEL=DEBUG \
-./run_complete_pipeline.sh
-```
-
-**Available environment variables:**
-- `TRACKS_CSV`: Path to tracks.csv metadata file
-- `N_TRACKS`: Number of tracks to process (default: 4000)
-- `SEED`: Random seed for reproducibility (default: 2025)
-- `AUDIO_ROOT`: Root directory for audio files
-- `OUTPUT_DIR`: Output directory for processed tracks
-- `SIMILARITY_MATRIX`: Path for similarity matrix output
-- `N_JOBS`: Number of parallel jobs (default: auto)
-- `LOG_LEVEL`: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-- `SIGNATURE_ORDER`: Path signature order (default: 1)
+1. source, environment and raw-input custody;
+2. strict track selection and compact feature extraction;
+3. strict exploratory data analysis;
+4. generation of the immutable synthetic population;
+5. validation-only configuration selection;
+6. warm and additive withheld-item test evaluation;
+7. genre diagnostics and robustness analysis;
+8. figures and dissertation packages; and
+9. independent deep validation and the final release seal.
 
 ### **Pipeline Features**
 
-- **Dependency Checking**: Automatically verifies required files exist before each step
-- **Error Handling**: Exits gracefully on critical failures, warns on missing optional dependencies
-- **Progress Tracking**: Clear step indicators and completion messages
-- **Resume Capability**: Can resume from any step if previous steps completed successfully
-- **Flexible Execution**: Skip optional steps or specific steps as needed
+- **Immutable scientific contract**: catalogue size, seeds, task definitions,
+  configuration grids and four worker processes are fixed in source.
+- **No partial release**: every stage is mandatory and a failed run is never
+  sealed or resumed as the official evidence.
+- **Fresh output**: the run root must not already exist and cannot overlap the
+  repository or raw inputs.
+- **Exclusive execution**: a non-blocking host-global lock prevents overlapping
+  official runs.
+- **Bounded execution**: the shell entry point terminates the workload within
+  the reviewed twelve-hour process-tree ceiling.
+- **Independent validation**: every dissertation-facing artefact is cross-bound,
+  re-derived where practical, checksummed and inventoried before sealing.
 
 ## Complete Workflow: Start to Finish
 
@@ -335,12 +299,12 @@ This generates:
 Compute path signatures and similarity matrices:
 
 ```bash
-# Basic computation (optimal order for best performance/speed ratio)
+# Basic computation at the canonical comparison order
 python src/scripts/compute_similarity.py \
     --features_file data/processed_tracks/features.json \
     --tracks-json data/processed_tracks/selected_tracks.json \
     --output data/similarity_matrix.npz \
-    --signature-order 1 \
+    --signature-order 3 \
     --results-dir results/similarity_computation
 ```
 
@@ -365,11 +329,17 @@ Run comprehensive ablation studies:
 
 ```bash
 # Run ablation studies
+SOURCE_REVISION="$(git rev-parse --verify HEAD)"
 python src/scripts/run_ablation_studies.py \
     --tracks-json data/processed_tracks/selected_tracks.json \
-    --features-dir data/processed_tracks \
-    --output-dir results/ablation_studies \
-    --signature-orders "1,2,3,4" \
+    --features-file data/processed_tracks/features.json \
+    --output-dir "results/ablation_runs/$SOURCE_REVISION" \
+    --source-revision "$SOURCE_REVISION" \
+    --k-values "5,10" \
+    --max-tracks 400 \
+    --sample-seed 2025 \
+    --min-genre-tracks 20 \
+    --signature-orders "1,2,3" \
     --temperatures "0.1,0.5,1.0,2.0,5.0" \
     --similarity-metrics "cosine,euclidean,manhattan"
 ```
@@ -400,7 +370,7 @@ python src/scripts/generate_predictions.py \
     --features-file data/processed_tracks/features.json \
     --tracks-json data/processed_tracks/selected_tracks.json \
     --output-dir data/predictions.json \
-    --signature-order 2 \
+    --signature-order 3 \
     --results-dir results/predictions
 ```
 
@@ -470,7 +440,8 @@ Sync all figures to the workspace figures directory for LaTeX compilation:
 ```bash
 python src/scripts/sync_figures.py \
     --code-root . \
-    --figures-dir ../figures
+    --figures-dir ../figures \
+    --ablation-dir results/ablation_runs/$(git rev-parse --verify HEAD)
 ```
 
 This script copies figures from their generation locations to `/workspace/figures/`:
@@ -482,7 +453,8 @@ This script copies figures from their generation locations to `/workspace/figure
 - `significance_heatmap.png` from `results/dissertation_figures/`
 - `system_architecture.png` from `results/dissertation_figures/`
 - `baseline_performance.png` from `results/baseline_comparison/`
-- `ablation_overview.png` from `results/ablation_studies/`
+- `ablation_overview.png` from the explicitly selected, source-revision-specific
+  directory under `results/ablation_runs/`
 - `cross_genre_similarity.png` from `results/visualisations/` (if generated)
 
 ### **Step 11: Generate Synthetic Users (Optional)**
@@ -546,18 +518,18 @@ pytest tests/test_ablation_studies.py -v
 
 - **Mathematical Foundation**: Uses rough path theory to capture musical structure
 - **esig Library**: Efficient signature computation via esig library
-- **Default Order**: Order 1 (optimal performance/speed ratio); ablations at orders 2–4
-- **Genre-based Categories**: Uses actual music metadata instead of arbitrary clustering
-- **Enhanced Similarity**: Configurable weights with 80% focus on path signatures
+- **Canonical Order**: Order 3; the corrected exploratory ablation compares feasible orders 1–3 without assuming a winner
+- **Configurable Categories**: Supports genre labels or deterministic pseudo-category clustering; the corrected ablation explicitly uses clustering
+- **Composite Similarity**: Uses explicit configurable component weights
 
 ### Softmax Regression
 
-- **Genre-based Categories**: Uses actual genre labels from music metadata
+- **Configurable Categories**: Uses genre labels when requested, otherwise deterministic pseudo-category clustering
 - **Probability Distributions**: Learns probability distributions over categories
 - **Optimised Similarity**: Combines multiple similarity metrics with focus on path signatures:
-  - Path signature similarity (80% weight) - captures musical shape
-  - Category probability similarity (15% weight) - captures genre preferences
-  - Category agreement (5% weight) - captures genre matching
+  - Path signature similarity (70% by default) - captures musical shape
+  - Category probability similarity (20% by default) - captures category-pattern agreement
+  - Category agreement (10% by default) - captures exact category matches
 
 ### Visualisation
 

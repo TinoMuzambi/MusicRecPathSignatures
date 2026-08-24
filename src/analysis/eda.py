@@ -16,6 +16,7 @@ Example:
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Any
 import numpy as np
@@ -27,6 +28,53 @@ from scipy import stats
 from ..utils.logger_config import setup_logger
 
 logger = setup_logger("eda")
+
+
+
+def humanise_feature_label(raw_name: str) -> str:
+    """Format a raw feature-column identifier for display on a figure axis.
+
+    The summary CSV keeps the raw identifiers, which are the authoritative
+    join keys. Only the plotted tick labels are rewritten, so this affects
+    presentation and never provenance.
+    """
+
+    name = str(raw_name)
+    suffix = ""
+    for statistic in ("_mean", "_std"):
+        if name.endswith(statistic):
+            suffix = f" ({statistic.lstrip('_')})"
+            name = name[: -len(statistic)]
+            break
+
+    match = re.fullmatch(r"multi_dimensional_series_(\d+)", name)
+    if match:
+        return f"Path series {match.group(1)}{suffix}"
+
+    match = re.fullmatch(r"mfccs?_(\d+)", name)
+    if match:
+        return f"MFCC {match.group(1)}{suffix}"
+
+    match = re.fullmatch(r"chroma_(\d+)", name)
+    if match:
+        return f"Chroma {match.group(1)}{suffix}"
+
+    special = {
+        "zero_crossing_rate": "Zero-crossing rate",
+        "spectral_centroid": "Spectral centroid",
+        "spectral_bandwidth": "Spectral bandwidth",
+        "spectral_rolloff": "Spectral roll-off",
+        "rms_energy": "RMS energy",
+        "loudness": "Loudness",
+        "pitch": "Pitch",
+        "tempo": "Tempo",
+    }
+    if name in special:
+        return f"{special[name]}{suffix}"
+
+    # Fail open on shape, but never emit a bare underscore-joined token.
+    readable = name.replace("_", " ").strip()
+    return f"{readable[:1].upper()}{readable[1:]}{suffix}"
 
 
 class DatasetAnalyzer:
@@ -103,25 +151,55 @@ class DatasetAnalyzer:
         return results
 
     def _features_to_dataframe(self, features_data: Dict) -> pd.DataFrame:
-        """Convert features dictionary to DataFrame."""
-        # Extract feature names and values
-        feature_names = []
-        feature_values = []
+        """Convert a features dict into a tracks x features DataFrame.
 
-        for track_id, features in features_data.items():
+        One row per track. Scalar numeric features become one column each.
+        Array-valued features (real saved feature records store MFCCs,
+        chroma, and other sequences as plain Python ``list`` after JSON
+        deserialisation, not ``np.ndarray``) are summarised into mean/std
+        columns -- per row for a 2D array such as MFCCs/chroma, or overall
+        for a 1D array -- rather than silently dropped. An earlier version
+        of this method only recognised ``int``/``float``/``np.ndarray``
+        values, so every real array-valued feature was dropped and
+        downstream feature-statistics/correlation/outlier detection
+        silently received an empty DataFrame (R9 evidence audit D-15).
+        """
+
+        rows: list[Dict[str, float]] = []
+        for _, features in features_data.items():
+            row: Dict[str, float] = {}
+            if not isinstance(features, dict):
+                rows.append(row)
+                continue
             for feature_name, feature_value in features.items():
+                if isinstance(feature_value, bool):
+                    continue
                 if isinstance(feature_value, (int, float)):
-                    feature_names.append(f"{track_id}_{feature_name}")
-                    feature_values.append(feature_value)
-                elif isinstance(feature_value, np.ndarray):
-                    # Handle array features (e.g., MFCCs)
-                    for i, val in enumerate(feature_value):
-                        feature_names.append(f"{track_id}_{feature_name}_{i}")
-                        feature_values.append(val)
+                    if np.isfinite(feature_value):
+                        row[feature_name] = float(feature_value)
+                    continue
+                if isinstance(feature_value, (list, np.ndarray)):
+                    try:
+                        array = np.asarray(feature_value, dtype=float)
+                    except (TypeError, ValueError):
+                        continue
+                    if array.size == 0:
+                        continue
+                    if array.ndim == 2:
+                        for i in range(array.shape[0]):
+                            coeff = array[i, :]
+                            coeff = coeff[np.isfinite(coeff)]
+                            if coeff.size:
+                                row[f"{feature_name}_{i}_mean"] = float(np.mean(coeff))
+                                row[f"{feature_name}_{i}_std"] = float(np.std(coeff))
+                    elif array.ndim == 1:
+                        flat = array[np.isfinite(array)]
+                        if flat.size:
+                            row[f"{feature_name}_mean"] = float(np.mean(flat))
+                            row[f"{feature_name}_std"] = float(np.std(flat))
+            rows.append(row)
 
-        # Create DataFrame
-        df = pd.DataFrame([feature_values], columns=feature_names)
-        return df.T
+        return pd.DataFrame(rows)
 
     def _compute_basic_statistics(
         self, tracks_df: pd.DataFrame, features_df: pd.DataFrame
@@ -257,15 +335,33 @@ class DatasetAnalyzer:
         }
 
     def _detect_outliers(self, features_df: pd.DataFrame) -> Dict[str, Any]:
-        """Detect outliers using IQR and Z-score methods."""
+        """Detect missing values and outliers (IQR and Z-score methods) per column.
+
+        The ``missing`` entry (R9 evidence audit D-15) is computed over the
+        full column, before any row is dropped, so it reports genuine
+        missingness rather than being silently absorbed by ``dropna()``.
+        """
         if features_df.empty:
             return {}
 
         outliers = {}
 
         for column in features_df.select_dtypes(include=[np.number]).columns:
-            data = features_df[column].dropna()
+            full_column = features_df[column]
+            n_total = len(full_column)
+            n_missing = int(full_column.isna().sum())
+            missing_entry = {
+                "count": n_missing,
+                "percentage": float(n_missing / n_total * 100) if n_total else 0.0,
+            }
+
+            data = full_column.dropna()
             if len(data) < 4:  # Need at least 4 points for outlier detection
+                outliers[column] = {
+                    "missing": missing_entry,
+                    "iqr_outliers": {"count": 0, "percentage": 0.0, "indices": []},
+                    "zscore_outliers": {"count": 0, "percentage": 0.0, "indices": []},
+                }
                 continue
 
             # IQR method
@@ -281,6 +377,7 @@ class DatasetAnalyzer:
             z_outliers = data[z_scores > 3]
 
             outliers[column] = {
+                "missing": missing_entry,
                 "iqr_outliers": {
                     "count": len(iqr_outliers),
                     "percentage": float(len(iqr_outliers) / len(data) * 100),
@@ -380,25 +477,55 @@ class GenreAnalyzer:
         np.random.seed(random_state)
 
     def _features_to_dataframe(self, features_data: Dict) -> pd.DataFrame:
-        """Convert features dictionary to DataFrame."""
-        # Extract feature names and values
-        feature_names = []
-        feature_values = []
+        """Convert a features dict into a tracks x features DataFrame.
 
-        for track_id, features in features_data.items():
+        One row per track. Scalar numeric features become one column each.
+        Array-valued features (real saved feature records store MFCCs,
+        chroma, and other sequences as plain Python ``list`` after JSON
+        deserialisation, not ``np.ndarray``) are summarised into mean/std
+        columns -- per row for a 2D array such as MFCCs/chroma, or overall
+        for a 1D array -- rather than silently dropped. An earlier version
+        of this method only recognised ``int``/``float``/``np.ndarray``
+        values, so every real array-valued feature was dropped and
+        downstream feature-statistics/correlation/outlier detection
+        silently received an empty DataFrame (R9 evidence audit D-15).
+        """
+
+        rows: list[Dict[str, float]] = []
+        for _, features in features_data.items():
+            row: Dict[str, float] = {}
+            if not isinstance(features, dict):
+                rows.append(row)
+                continue
             for feature_name, feature_value in features.items():
+                if isinstance(feature_value, bool):
+                    continue
                 if isinstance(feature_value, (int, float)):
-                    feature_names.append(f"{track_id}_{feature_name}")
-                    feature_values.append(feature_value)
-                elif isinstance(feature_value, np.ndarray):
-                    # Handle array features (e.g., MFCCs)
-                    for i, val in enumerate(feature_value):
-                        feature_names.append(f"{track_id}_{feature_name}_{i}")
-                        feature_values.append(val)
+                    if np.isfinite(feature_value):
+                        row[feature_name] = float(feature_value)
+                    continue
+                if isinstance(feature_value, (list, np.ndarray)):
+                    try:
+                        array = np.asarray(feature_value, dtype=float)
+                    except (TypeError, ValueError):
+                        continue
+                    if array.size == 0:
+                        continue
+                    if array.ndim == 2:
+                        for i in range(array.shape[0]):
+                            coeff = array[i, :]
+                            coeff = coeff[np.isfinite(coeff)]
+                            if coeff.size:
+                                row[f"{feature_name}_{i}_mean"] = float(np.mean(coeff))
+                                row[f"{feature_name}_{i}_std"] = float(np.std(coeff))
+                    elif array.ndim == 1:
+                        flat = array[np.isfinite(array)]
+                        if flat.size:
+                            row[f"{feature_name}_mean"] = float(np.mean(flat))
+                            row[f"{feature_name}_std"] = float(np.std(flat))
+            rows.append(row)
 
-        # Create DataFrame
-        df = pd.DataFrame([feature_values], columns=feature_names)
-        return df.T
+        return pd.DataFrame(rows)
 
     def analyze_genres(
         self, tracks_data: List[Dict], features_data: Dict
@@ -618,6 +745,7 @@ class EDAReporter:
         # Create all visualisations
         self._create_feature_distributions(features_data)
         self._create_correlation_matrix(features_data)
+        self._create_missing_value_outlier_summary(features_data)
         self._create_genre_analysis(tracks_data, genre_results)
         self._create_temporal_analysis(tracks_data)
 
@@ -629,6 +757,87 @@ class EDAReporter:
         self._generate_markdown_report(dataset_results, genre_results)
 
         logger.info("Comprehensive EDA report generated successfully")
+
+    def _create_missing_value_outlier_summary(self, features_data: Dict) -> None:
+        """Illustrate which features are most/least affected by missing
+        values and/or outliers (R9 evidence audit D-15; examiner request,
+        Section 3.5.2 / printed page 31).
+
+        Builds the real tracks x features summary matrix via
+        ``DatasetAnalyzer._features_to_dataframe`` (fixed to actually
+        summarise array-valued features rather than silently dropping them)
+        and ``DatasetAnalyzer._detect_outliers`` (IQR + missing-value rate
+        per column), then plots a horizontal grouped bar chart of the most
+        affected features, sorted by combined missing+outlier rate.
+        """
+
+        analyzer = DatasetAnalyzer()
+        features_df = analyzer._features_to_dataframe(features_data)
+        if features_df.empty:
+            logger.warning(
+                "No feature data available for missing-value/outlier summary"
+            )
+            return
+
+        column_stats = analyzer._detect_outliers(features_df)
+        if not column_stats:
+            logger.warning(
+                "Every feature column had fewer than 4 valid values; "
+                "no missing-value/outlier summary can be computed"
+            )
+            return
+
+        rows = []
+        for feature_name, stats_for_column in column_stats.items():
+            missing_pct = stats_for_column["missing"]["percentage"]
+            outlier_pct = stats_for_column["iqr_outliers"]["percentage"]
+            rows.append(
+                {
+                    "feature": feature_name,
+                    "missing_pct": missing_pct,
+                    "outlier_pct": outlier_pct,
+                    "combined_pct": missing_pct + outlier_pct,
+                }
+            )
+        summary = pd.DataFrame(rows).sort_values("combined_pct", ascending=False)
+        summary.to_csv(
+            self.output_dir / "missing_value_outlier_summary.csv", index=False
+        )
+
+        top_n = min(20, len(summary))
+        plotted = summary.head(top_n).iloc[::-1]  # ascending for a top-down barh read
+        y_positions = np.arange(len(plotted))
+        height = 0.38
+
+        plt.figure(figsize=(10, max(4, 0.4 * len(plotted))))
+        plt.barh(
+            y_positions - height / 2,
+            plotted["missing_pct"],
+            height=height,
+            label="Missing (%)",
+            color="#d62728",
+        )
+        plt.barh(
+            y_positions + height / 2,
+            plotted["outlier_pct"],
+            height=height,
+            label="Outliers, IQR method (%)",
+            color="#1f77b4",
+        )
+        plt.yticks(
+            y_positions, [humanise_feature_label(f) for f in plotted["feature"]]
+        )
+        plt.xlabel("Percentage of tracks affected")
+        # No internal title: single-panel figures are captioned in the
+        # surrounding LaTeX (examiner G-05).
+        plt.legend(loc="lower right")
+        plt.tight_layout()
+        plt.savefig(
+            self.output_dir / "missing_value_outlier_summary.png",
+            dpi=self.dpi,
+            bbox_inches="tight",
+        )
+        plt.close()
 
     def _create_feature_distributions(self, features_data: Dict) -> None:
         """Create feature distribution plots."""
@@ -944,7 +1153,8 @@ class EDAReporter:
             linecolor="white",
             cbar_kws={"label": "Correlation Coefficient"},
         )
-        plt.title("Feature Correlation Matrix", fontsize=14, fontweight="bold")
+        # No internal title: single-panel figures are captioned in the
+        # surrounding LaTeX (examiner G-05).
         plt.tight_layout()
         plt.savefig(
             self.output_dir / "correlation_matrix.png",
@@ -966,8 +1176,12 @@ class EDAReporter:
         if "genre" not in tracks_df.columns:
             return
 
-        # Genre distribution
-        _, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        # Genre distribution. Widen the figure with the number of genres so
+        # that all category labels (rotated 45 degrees) stay legible without
+        # overlapping, even with long genre names like "Old-Time / Historic".
+        n_genres = tracks_df["genre"].nunique()
+        bar_width = max(16, n_genres * 0.9)
+        _, (ax1, ax2) = plt.subplots(1, 2, figsize=(bar_width, 7))
 
         # Genre count bar chart
         genre_counts = tracks_df["genre"].value_counts()
@@ -975,7 +1189,9 @@ class EDAReporter:
         ax1.set_title("Genre Distribution")
         ax1.set_xlabel("Genre")
         ax1.set_ylabel("Number of Tracks")
-        ax1.tick_params(axis="x", rotation=45)
+        ax1.set_xticklabels(
+            ax1.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor"
+        )
 
         # Genre percentage pie chart (excluding genres with < 2%)
         genre_percentages = tracks_df["genre"].value_counts(normalize=True) * 100

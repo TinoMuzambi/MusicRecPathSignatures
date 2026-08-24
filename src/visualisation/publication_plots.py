@@ -44,18 +44,59 @@ def bar_with_cis(
     ci_lows: List[float],
     ci_highs: List[float],
     ylabel: str,
-    title: str,
     out_path: Path,
+    title: Optional[str] = None,
+    highlight_label: Optional[str] = None,
+    sort_descending: bool = True,
 ) -> None:
+    """Plot bars with 95% CI error bars.
+
+    Args:
+        highlight_label: if given and present in `labels`, that bar is
+            drawn in a distinct accent colour while every other bar shares
+            a neutral colour -- used to call out the dissertation's own
+            proposed method against baseline methods.
+        sort_descending: if True (default), bars are ordered by descending
+            `means` rather than the order `labels` were passed in
+            (typically alphabetical), which is otherwise an arbitrary and
+            uninformative ordering for a results comparison figure.
+    """
     set_publication_style()
+
+    if sort_descending:
+        order = sorted(range(len(labels)), key=lambda i: means[i], reverse=True)
+        labels = [labels[i] for i in order]
+        means = [means[i] for i in order]
+        ci_lows = [ci_lows[i] for i in order]
+        ci_highs = [ci_highs[i] for i in order]
+
     errs_low = np.array(means) - np.array(ci_lows)
     errs_high = np.array(ci_highs) - np.array(means)
     errs = [errs_low, errs_high]
 
+    # Neutral colour for baseline methods, distinct accent colour for the
+    # dissertation's own proposed method (if identified via
+    # `highlight_label`) so it stands out from the baselines it's compared
+    # against, rather than every bar being a uniform, undifferentiated blue.
+    baseline_color = "#8C9BAB"  # neutral slate grey-blue
+    highlight_color = "#D65F2C"  # distinct warm accent
+    if highlight_label is not None and highlight_label in labels:
+        bar_colors = [
+            highlight_color if label == highlight_label else baseline_color
+            for label in labels
+        ]
+    else:
+        bar_colors = None
+
     fig, ax = plt.subplots(figsize=(6, 5))
-    bars = ax.bar(labels, means, yerr=errs, capsize=4)
+    bars = ax.bar(labels, means, yerr=errs, capsize=4, color=bar_colors)
     ax.set_ylabel(ylabel)
-    ax.set_title(title, pad=20)
+    if title:
+        # Single-panel figures are captioned in the surrounding LaTeX
+        # (examiner G-05: an internal title duplicates a caption that
+        # already describes the figure), so no title is drawn unless the
+        # caller explicitly asks for one.
+        ax.set_title(title, pad=20)
     
     # Calculate annotation offset and adjust ylim to accommodate annotations
     max_err = max(errs_high) if len(errs_high) > 0 else 0.02
@@ -80,6 +121,14 @@ def bar_with_cis(
             va="bottom",
             fontsize=9,
         )
+
+    if bar_colors is not None:
+        legend_handles = [
+            plt.Rectangle((0, 0), 1, 1, color=highlight_color, label=highlight_label),
+            plt.Rectangle((0, 0), 1, 1, color=baseline_color, label="Baseline methods"),
+        ]
+        ax.legend(handles=legend_handles, frameon=False, loc="upper right", fontsize=8)
+
     plt.tight_layout(rect=[0, 0, 1, 0.95])  # Leave space at top for title
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
@@ -90,12 +139,22 @@ def heatmap_matrix(
     matrix: np.ndarray,
     x_labels: List[str],
     y_labels: List[str],
-    title: str,
     out_path: Path,
+    title: Optional[str] = None,
     cmap: str = "viridis",
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
+    annotations: Optional[np.ndarray] = None,
 ) -> None:
+    """Plot a heatmap, optionally with per-cell text annotations.
+
+    ``annotations``, if given, must be a string array the same shape as
+    ``matrix`` and is drawn in each cell instead of relying on colour
+    alone to convey the value (examiner F-09/R-08/R-09: colour-only
+    encoding cannot distinguish a handful of very small p-values, and
+    conveys magnitude but not direction).
+    """
+
     set_publication_style()
     fig, ax = plt.subplots(figsize=(6, 5))
     sns.heatmap(
@@ -105,12 +164,16 @@ def heatmap_matrix(
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
-        annot=False,
+        annot=annotations if annotations is not None else False,
+        fmt="" if annotations is not None else "g",
         cbar_kws={"shrink": 0.8},
         linewidths=0.5,
         linecolor="white",
     )
-    ax.set_title(title)
+    if title:
+        # Single-panel figures are captioned in the surrounding LaTeX
+        # (examiner G-05), so no title is drawn unless explicitly requested.
+        ax.set_title(title)
     plt.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)

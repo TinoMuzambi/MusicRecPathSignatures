@@ -1,11 +1,7 @@
-"""
-Script to sync figures from various locations to the workspace figures directory.
-
-This script copies figures from their generation locations to /workspace/figures/
-for use in the LaTeX dissertation.
-"""
+"""Copy exactly the seven cited figures into a fresh release directory."""
 
 import argparse
+import hashlib
 import shutil
 from pathlib import Path
 from src.utils.logger_config import configure_logging, setup_logger
@@ -14,9 +10,18 @@ from src.utils.logger_config import configure_logging, setup_logger
 logger = setup_logger("sync_figures")
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def sync_figures(
     code_root: Path,
     figures_dir: Path,
+    ablation_dir: Path | None,
     overwrite: bool = True,
 ) -> None:
     """
@@ -25,64 +30,50 @@ def sync_figures(
     Args:
         code_root: Root directory of the code (e.g., /workspace/code)
         figures_dir: Target figures directory (e.g., /workspace/figures)
+        ablation_dir: Exact validated ablation run directory
         overwrite: Whether to overwrite existing files
     """
-    figures_dir.mkdir(parents=True, exist_ok=True)
+    if ablation_dir is None:
+        raise ValueError("an exact validated ablation directory is required")
+    ablation_source = ablation_dir / "ablation_overview.png"
     
     # Mapping of source files to destination names
     figure_mappings = [
-        # From code/results/eda/
-        (code_root / "results" / "eda" / "genre_analysis.png", "genre_analysis.png"),
-
-        # From code/results/synthetic_users/
-        (code_root / "results" / "synthetic_users" / "user_archetypes.png", "user_archetypes.png"),
-        (code_root / "results" / "synthetic_users" / "interaction_heatmap.png", "interaction_heatmap.png"),
-
-        # From code/results/evaluation/
+        (code_root / "results" / "synthetic_user_figures" / "user_archetypes.png", "user_archetypes.png"),
+        (code_root / "results" / "synthetic_user_figures" / "interaction_heatmap.png", "interaction_heatmap.png"),
         (code_root / "results" / "evaluation" / "confusion_matrix.png", "confusion_matrix.png"),
-
-        # From code/results/visualisations/
-        (code_root / "results" / "visualisations" / "feature_embedding_pca.png", "feature_embedding_pca.png"),
-        (code_root / "results" / "visualisations" / "feature_embedding_tsne.png", "feature_embedding_tsne.png"),
-        (code_root / "results" / "visualisations" / "cross_genre_similarity.png", "cross_genre_similarity.png"),
-
-        # From code/results/dissertation_figures/
+        (code_root / "results" / "eda" / "missing_value_outlier_summary.png", "missing_value_outlier_summary.png"),
         (code_root / "results" / "dissertation_figures" / "fig_05_method_comparison.png", "method_comparison.png"),
         (code_root / "results" / "dissertation_figures" / "fig_06_significance_heatmap.png", "significance_heatmap.png"),
-        (code_root / "results" / "dissertation_figures" / "system_architecture.png", "system_architecture.png"),
-
-        # From code/results/baseline_comparison/
-        (code_root / "results" / "baseline_comparison" / "performance_comparison.png", "baseline_performance.png"),
-
-        # From code/results/ablation_studies/
-        (code_root / "results" / "ablation_studies" / "ablation_overview.png", "ablation_overview.png"),
+        (ablation_source, "ablation_overview.png"),
     ]
-    
-    copied = 0
-    skipped = 0
-    missing = 0
-    
+
+    for src_path, _ in figure_mappings:
+        if src_path.is_symlink() or not src_path.is_file():
+            raise FileNotFoundError(
+                f"required figure must be a regular, non-symlink file: {src_path}"
+            )
+    if figures_dir.exists():
+        existing = tuple(figures_dir.iterdir())
+        if existing and not overwrite:
+            raise FileExistsError(f"figure release directory is not empty: {figures_dir}")
+        expected_names = {name for _, name in figure_mappings}
+        unrelated = sorted(path.name for path in existing if path.name not in expected_names)
+        if unrelated:
+            raise FileExistsError(
+                "figure release directory contains unrelated files: " + ", ".join(unrelated)
+            )
+    else:
+        figures_dir.mkdir(parents=True)
+
     for src_path, dst_name in figure_mappings:
         dst_path = figures_dir / dst_name
-        
-        if not src_path.exists():
-            logger.warning("Source file does not exist: %s", src_path)
-            missing += 1
-            continue
-        
         if dst_path.exists() and not overwrite:
-            logger.info("Skipping (already exists): %s", dst_name)
-            skipped += 1
-            continue
-        
-        try:
-            shutil.copy2(src_path, dst_path)
-            logger.info("Copied: %s -> %s", src_path.name, dst_name)
-            copied += 1
-        except Exception as e:
-            logger.error("Failed to copy %s: %s", src_path, e)
-    
-    logger.info("Sync complete: %d copied, %d skipped, %d missing", copied, skipped, missing)
+            raise FileExistsError(f"refusing to overwrite cited figure: {dst_path}")
+        shutil.copy2(src_path, dst_path)
+        if _sha256_file(src_path) != _sha256_file(dst_path):
+            raise OSError(f"copied figure checksum mismatch: {dst_name}")
+        logger.info("Copied: %s -> %s", src_path, dst_path)
 
 
 def main():
@@ -103,6 +94,12 @@ def main():
         help="Target figures directory (default: ../figures)",
     )
     parser.add_argument(
+        "--ablation-dir",
+        type=str,
+        required=True,
+        help="Exact validated ablation run directory",
+    )
+    parser.add_argument(
         "--no-overwrite",
         action="store_true",
         help="Don't overwrite existing files",
@@ -118,22 +115,18 @@ def main():
     
     code_root = Path(args.code_root).resolve()
     figures_dir = Path(args.figures_dir).resolve()
+    ablation_dir = Path(args.ablation_dir).resolve()
     
-    # Set up logging with file handler
-    figures_dir.mkdir(parents=True, exist_ok=True)
-    log_file = figures_dir / "sync_figures.log"
-    configure_logging(args.log_level, log_file=str(log_file))
-    logger = setup_logger("sync_figures")
-    logger.info("Logging to file: %s", log_file)
+    configure_logging(args.log_level)
     logger.info("Syncing figures from %s to %s", code_root, figures_dir)
     
     sync_figures(
         code_root=code_root,
         figures_dir=figures_dir,
+        ablation_dir=ablation_dir,
         overwrite=not args.no_overwrite,
     )
 
 
 if __name__ == "__main__":
     main()
-

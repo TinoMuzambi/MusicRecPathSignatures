@@ -1,46 +1,66 @@
-"""
-Script for generating synthetic users for music recommendation evaluation.
+"""Export the fixed controlled synthetic-user simulation for evaluation.
 
-This script creates realistic synthetic users with diverse preferences and interaction patterns,
-enabling comprehensive evaluation of recommendation systems without real user data.
-
-Usage:
-    python src/scripts/generate_synthetic_users.py --tracks-json data/processed_tracks/selected_tracks.json --output-dir results/synthetic_users --n-users 100
+The output represents simulated, not observed, user behaviour. Population
+size, master seed, archetypes, proportions, and within-user split fractions are
+fixed by AUD-D03 and MR-01 rather than configurable through this command.
 """
 
 import argparse
+import hashlib
 import json
-import os
-import sys
 from pathlib import Path
+
+from src.utils.provenance import canonical_json_bytes
 from typing import Dict, List, Any
 
-import numpy as np
-
-from src.data.synthetic_users import SyntheticUserGenerator
+from src.data.synthetic_users import (
+    CANONICAL_MASTER_SEED,
+    CANONICAL_POPULATION_SIZE,
+    build_synthetic_population,
+    validate_synthetic_population,
+)
 from src.utils.logger_config import configure_logging, setup_logger
-
-# Add src to path for imports
-sys.path.append(str(Path(__file__).parent.parent.parent))
 
 logger = setup_logger("generate_synthetic_users")
 
+CANONICAL_EXPORT_FILENAMES = {
+    "canonical_synthetic_users.json",
+    "canonical_user_interactions.json",
+    "canonical_train_interactions.json",
+    "canonical_validation_interactions.json",
+    "canonical_test_interactions.json",
+    "canonical_synthetic_user_configuration.json",
+    "canonical_synthetic_user_diagnostics.json",
+}
+LEGACY_SYNTHETIC_USER_FILENAMES = {
+    "synthetic_users.json",
+    "user_interactions.json",
+    "train_users.json",
+    "validation_users.json",
+    "test_users.json",
+    "train_interactions.json",
+    "validation_interactions.json",
+    "test_interactions.json",
+    "user_statistics.json",
+    "user_statistics_table.csv",
+    "interaction_matrix_summary.json",
+    "split_statistics.json",
+    "user_archetypes.png",
+    "interaction_heatmap.png",
+    "SYNTHETIC_USERS_REPORT.md",
+}
+POPULATION_MANIFEST_FILENAME = "canonical_synthetic_population_manifest.json"
+POPULATION_FILENAME = "canonical_synthetic_population.json"
 
-def parse_args():
+
+def parse_args(argv=None):
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Generate synthetic users for music recommendation evaluation",
+        description="Export the fixed controlled 200-user simulation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-    # Generate 100 users with default settings
-    python src/scripts/generate_synthetic_users.py --tracks-json data/processed_tracks/selected_tracks.json --output-dir results/synthetic_users --n-users 100
-    
-    # Generate 200 users with custom archetype distribution
-    python src/scripts/generate_synthetic_users.py --tracks-json data/processed_tracks/selected_tracks.json --output-dir results/synthetic_users --n-users 200 --enthusiast-ratio 0.3 --specialist-ratio 0.3 --casual-ratio 0.2 --explorer-ratio 0.1 --mainstream-ratio 0.1
-    
-    # Generate users with specific test ratio
-    python src/scripts/generate_synthetic_users.py --tracks-json data/processed_tracks/selected_tracks.json --output-dir results/synthetic_users --n-users 150 --test-ratio 0.25
+Example:
+    python src/scripts/generate_synthetic_users.py --tracks-json selected_tracks.json --output-dir canonical_synthetic_users
         """,
     )
 
@@ -62,71 +82,16 @@ Examples:
     parser.add_argument(
         "--n-users",
         type=int,
-        default=100,
-        help="Number of synthetic users to generate (default: 100)",
-    )
-    parser.add_argument(
-        "--test-ratio",
-        type=float,
-        default=0.15,
-        help="Ratio of users for testing (default: 0.15)",
-    )
-    parser.add_argument(
-        "--validation-ratio",
-        type=float,
-        default=0.15,
-        help="Ratio of users for validation (default: 0.15)",
+        choices=[CANONICAL_POPULATION_SIZE],
+        default=CANONICAL_POPULATION_SIZE,
+        help="Canonical synthetic population size (fixed at 200)",
     )
     parser.add_argument(
         "--random-seed",
         type=int,
-        default=2025,
-        help="Random seed for reproducibility (default: 2025)",
-    )
-
-    # Archetype distribution parameters
-    parser.add_argument(
-        "--enthusiast-ratio",
-        type=float,
-        default=0.2,
-        help="Proportion of Music Enthusiast users (default: 0.2)",
-    )
-    parser.add_argument(
-        "--specialist-ratio",
-        type=float,
-        default=0.25,
-        help="Proportion of Genre Specialist users (default: 0.25)",
-    )
-    parser.add_argument(
-        "--casual-ratio",
-        type=float,
-        default=0.3,
-        help="Proportion of Casual Listener users (default: 0.3)",
-    )
-    parser.add_argument(
-        "--explorer-ratio",
-        type=float,
-        default=0.15,
-        help="Proportion of Explorer users (default: 0.15)",
-    )
-    parser.add_argument(
-        "--mainstream-ratio",
-        type=float,
-        default=0.1,
-        help="Proportion of Mainstream Fan users (default: 0.1)",
-    )
-
-    # Output options
-    parser.add_argument(
-        "--dpi", type=int, default=300, help="DPI for saved figures (default: 300)"
-    )
-    parser.add_argument(
-        "--no-visualisations",
-        action="store_true",
-        help="Skip generating visualisations",
-    )
-    parser.add_argument(
-        "--no-report", action="store_true", help="Skip generating markdown report"
+        choices=[CANONICAL_MASTER_SEED],
+        default=CANONICAL_MASTER_SEED,
+        help="Canonical master seed (fixed at 2025)",
     )
 
     # Logging
@@ -138,27 +103,20 @@ Examples:
         help="Logging level (default: INFO)",
     )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def load_tracks_data(tracks_json: str) -> List[Dict[str, Any]]:
-    """
-    Load tracks data from JSON file.
-
-    Args:
-        tracks_json: Path to tracks JSON file
-
-    Returns:
-        List of track metadata dictionaries
-    """
+def load_tracks_data(
+    tracks_json: str | Path, *, expected_count: int = 4000
+) -> List[Dict[str, Any]]:
+    """Load the strict selected-track wrapper through its pure validator."""
     logger.info("Loading tracks data from %s", tracks_json)
+    from src.scripts.robust_track_processing import load_selected_tracks
 
-    if not os.path.exists(tracks_json):
-        raise FileNotFoundError(f"Tracks file not found: {tracks_json}")
-
-    with open(tracks_json, "r", encoding="utf-8") as f:
-        tracks_data = json.load(f)
-
+    tracks_data = load_selected_tracks(
+        tracks_json,
+        expected_count=expected_count,
+    )
     logger.info("Loaded %d tracks", len(tracks_data))
     return tracks_data
 
@@ -196,435 +154,345 @@ def validate_tracks_data(tracks_data: List[Dict[str, Any]]) -> None:
     logger.info("Tracks data validation passed")
 
 
-def create_archetype_distribution(args) -> Dict[str, float]:
-    """
-    Create archetype distribution from command line arguments.
+def _assert_export_directory_available(output_path: Path) -> None:
+    """Reject legacy or existing canonical records before writing anything."""
 
-    Args:
-        args: Parsed command line arguments
-
-    Returns:
-        Dictionary mapping archetype names to proportions
-    """
-    distribution = {
-        "music_enthusiast": args.enthusiast_ratio,
-        "genre_specialist": args.specialist_ratio,
-        "casual_listener": args.casual_ratio,
-        "explorer": args.explorer_ratio,
-        "mainstream_fan": args.mainstream_ratio,
-    }
-
-    # Validate distribution
-    total = sum(distribution.values())
-    if abs(total - 1.0) > 1e-6:
-        raise ValueError(f"Archetype distribution must sum to 1.0, got {total}")
-
-    # Check for negative values
-    for archetype, ratio in distribution.items():
-        if ratio < 0:
-            raise ValueError(f"Negative ratio for {archetype}: {ratio}")
-
-    logger.info("Archetype distribution: %s", distribution)
-    return distribution
-
-
-def generate_synthetic_users(
-    tracks_data: List[Dict[str, Any]],
-    n_users: int,
-    archetype_distribution: Dict[str, float],
-    random_seed: int,
-) -> tuple:
-    """
-    Generate synthetic users and interactions.
-
-    Args:
-        tracks_data: List of track metadata
-        n_users: Number of users to generate
-        archetype_distribution: Distribution of user archetypes
-        random_seed: Random seed for reproducibility
-
-    Returns:
-        Tuple of (users, interactions, generator)
-    """
-    logger.info("Generating %d synthetic users...", n_users)
-
-    # Initialize generator
-    generator = SyntheticUserGenerator(random_seed=random_seed)
-
-    # Generate users
-    users, interactions = generator.generate_users(
-        tracks_data=tracks_data,
-        n_users=n_users,
-        archetype_distribution=archetype_distribution,
+    legacy_collisions = sorted(
+        name
+        for name in LEGACY_SYNTHETIC_USER_FILENAMES
+        if (output_path / name).exists()
     )
-
-    logger.info(
-        "Generated %d users with %d total interactions",
-        len(users),
-        sum(len(user_interactions) for user_interactions in interactions.values()),
-    )
-
-    return users, interactions, generator
-
-
-def split_train_test(
-    users: Dict[str, Dict],
-    interactions: Dict[str, Dict],
-    test_ratio: float,
-    validation_ratio: float = 0.15,
-    random_seed: int = 2025,
-) -> tuple:
-    """
-    Split users into train, validation, and test sets.
-
-    Args:
-        users: User profiles dictionary
-        interactions: User interactions dictionary
-        test_ratio: Ratio of users for testing (default: 0.15)
-        validation_ratio: Ratio of users for validation (default: 0.15)
-        random_seed: Random seed for reproducibility
-
-    Returns:
-        Tuple of (train_users, validation_users, test_users,
-                 train_interactions, validation_interactions, test_interactions)
-    """
-    train_ratio = 1.0 - test_ratio - validation_ratio
-    logger.info(
-        "Splitting users into train/validation/test sets (train: %.2f, validation: %.2f, test: %.2f)",
-        train_ratio,
-        validation_ratio,
-        test_ratio,
-    )
-
-    np.random.seed(random_seed)
-
-    user_ids = list(users.keys())
-    np.random.shuffle(user_ids)
-
-    # Calculate split sizes
-    n_test = int(len(user_ids) * test_ratio)
-    n_validation = int(len(user_ids) * validation_ratio)
-    n_train = len(user_ids) - n_test - n_validation
-
-    # Ensure at least 1 user in each set
-    n_test = max(1, min(n_test, len(user_ids) - 2))
-    n_validation = max(1, min(n_validation, len(user_ids) - n_test - 1))
-    n_train = len(user_ids) - n_test - n_validation
-    if n_train < 1:
-        raise ValueError(
-            f"Cannot create train/validation/test split: insufficient users "
-            f"(total: {len(user_ids)}, test: {n_test}, validation: {n_validation})"
+    if legacy_collisions:
+        raise FileExistsError(
+            "output directory contains legacy synthetic-user artefacts: "
+            f"{legacy_collisions}"
         )
-
-    test_user_ids = user_ids[:n_test]
-    validation_user_ids = user_ids[n_test : n_test + n_validation]
-    train_user_ids = user_ids[n_test + n_validation :]
-
-    # Split users
-    train_users = {uid: users[uid] for uid in train_user_ids}
-    validation_users = {uid: users[uid] for uid in validation_user_ids}
-    test_users = {uid: users[uid] for uid in test_user_ids}
-
-    # Split interactions
-    train_interactions = {uid: interactions[uid] for uid in train_user_ids}
-    validation_interactions = {uid: interactions[uid] for uid in validation_user_ids}
-    test_interactions = {uid: interactions[uid] for uid in test_user_ids}
-
-    logger.info(
-        "Split: %d train users, %d validation users, %d test users",
-        len(train_users),
-        len(validation_users),
-        len(test_users),
+    canonical_collisions = sorted(
+        name
+        for name in (
+            *CANONICAL_EXPORT_FILENAMES,
+            POPULATION_MANIFEST_FILENAME,
+            POPULATION_FILENAME,
+            f"{POPULATION_FILENAME}.sha256",
+        )
+        if (output_path / name).exists()
     )
-
-    return (
-        train_users,
-        validation_users,
-        test_users,
-        train_interactions,
-        validation_interactions,
-        test_interactions,
-    )
+    if canonical_collisions:
+        raise FileExistsError(
+            "output directory already contains canonical synthetic-user exports: "
+            f"{canonical_collisions}"
+        )
 
 
 def export_user_data(
-    generator: SyntheticUserGenerator,
-    train_users: Dict[str, Dict],
-    validation_users: Dict[str, Dict],
-    test_users: Dict[str, Dict],
-    train_interactions: Dict[str, Dict],
-    validation_interactions: Dict[str, Dict],
-    test_interactions: Dict[str, Dict],
+    population: Dict[str, Any],
     output_dir: str,
+    *,
+    include_manifest: bool = False,
 ) -> None:
-    """
-    Export user data and statistics.
+    """Export the fixed population and its within-user split records."""
 
-    Args:
-        generator: SyntheticUserGenerator instance
-        train_users: Training user profiles
-        validation_users: Validation user profiles
-        test_users: Test user profiles
-        train_interactions: Training interactions
-        validation_interactions: Validation interactions
-        test_interactions: Test interactions
-        output_dir: Output directory
-    """
     logger.info("Exporting user data to %s", output_dir)
-
-    # Create output directory
     output_path = Path(output_dir)
+    _assert_export_directory_available(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Export all users (combined)
-    all_users = {**train_users, **validation_users, **test_users}
-    all_interactions = {
-        **train_interactions,
-        **validation_interactions,
-        **test_interactions,
+    configuration = population["configuration"]
+    common = {
+        "schema_version": population["schema_version"],
+        "master_seed": configuration["master_seed"],
     }
-
-    # Update generator with all data
-    generator.users = all_users
-    generator.interactions = all_interactions
-    generator.user_statistics = generator.calculate_user_statistics(
-        all_users, all_interactions
-    )
-
-    # Export combined data
-    generator.export_users(output_dir)
-
-    # Export train/test splits
-    with open(output_path / "train_users.json", "w", encoding="utf-8") as f:
-        json.dump(train_users, f, indent=2)
-
-    with open(output_path / "test_users.json", "w", encoding="utf-8") as f:
-        json.dump(test_users, f, indent=2)
-
-    with open(output_path / "train_interactions.json", "w", encoding="utf-8") as f:
-        json.dump(train_interactions, f, indent=2)
-
-    with open(output_path / "test_interactions.json", "w", encoding="utf-8") as f:
-        json.dump(test_interactions, f, indent=2)
-
-    # Export validation users and interactions
-    with open(output_path / "validation_users.json", "w", encoding="utf-8") as f:
-        json.dump(validation_users, f, indent=2)
-
-    with open(output_path / "validation_interactions.json", "w", encoding="utf-8") as f:
-        json.dump(validation_interactions, f, indent=2)
-
-    # Export split statistics
-    total_users = len(train_users) + len(validation_users) + len(test_users)
-    split_stats = {
-        "n_train_users": len(train_users),
-        "n_validation_users": len(validation_users),
-        "n_test_users": len(test_users),
-        "n_train_interactions": sum(
-            len(user_interactions) for user_interactions in train_interactions.values()
-        ),
-        "n_validation_interactions": sum(
-            len(user_interactions)
-            for user_interactions in validation_interactions.values()
-        ),
-        "n_test_interactions": sum(
-            len(user_interactions) for user_interactions in test_interactions.values()
-        ),
-        "train_ratio": len(train_users) / total_users if total_users > 0 else 0,
-        "validation_ratio": (
-            len(validation_users) / total_users if total_users > 0 else 0
-        ),
-        "test_ratio": len(test_users) / total_users if total_users > 0 else 0,
+    records = {
+        "canonical_synthetic_users.json": {
+            **common,
+            "record_type": "synthetic_users",
+            "users": population["users"],
+        },
+        "canonical_user_interactions.json": {
+            **common,
+            "record_type": "synthetic_user_interactions",
+            "interactions": population["interactions"],
+        },
+        "canonical_synthetic_user_configuration.json": {
+            **configuration,
+            "record_type": "synthetic_user_configuration",
+        },
+        "canonical_synthetic_user_diagnostics.json": {
+            **common,
+            "record_type": "synthetic_user_diagnostics",
+            "diagnostics": population["diagnostics"],
+        },
     }
+    for split_name in ("train", "validation", "test"):
+        records[f"canonical_{split_name}_interactions.json"] = {
+            **common,
+            "record_type": "within_user_interaction_split",
+            "split_name": split_name,
+            "split_rule": configuration["split_rule"],
+            "interactions": population["splits"][split_name],
+        }
+    for filename, record in records.items():
+        with open(output_path / filename, "w", encoding="utf-8") as output_file:
+            json.dump(
+                record,
+                output_file,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
 
-    with open(output_path / "split_statistics.json", "w", encoding="utf-8") as f:
-        json.dump(split_stats, f, indent=2)
+    if include_manifest:
+        file_hashes = {}
+        for filename in sorted(records):
+            digest = hashlib.sha256()
+            with (output_path / filename).open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            file_hashes[filename] = {
+                "bytes": (output_path / filename).stat().st_size,
+                "sha256": digest.hexdigest(),
+            }
+        manifest = {
+            "schema_version": 1,
+            "record_type": "canonical_synthetic_population_manifest",
+            "master_seed": configuration["master_seed"],
+            "population_size": configuration["population_size"],
+            "track_metadata_sha256": configuration["track_metadata_sha256"],
+            "files": file_hashes,
+        }
+        with (output_path / POPULATION_MANIFEST_FILENAME).open(
+            "w", encoding="utf-8"
+        ) as output_file:
+            json.dump(
+                manifest,
+                output_file,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
 
     logger.info("User data exported successfully")
 
 
-def create_visualisations(
-    generator: SyntheticUserGenerator, output_dir: str, dpi: int
-) -> None:
-    """
-    Create user visualisations.
+def export_population_file(population: Dict[str, Any], output_path: str | Path) -> str:
+    """Write the complete reusable population as one canonical immutable JSON."""
 
-    Args:
-        generator: SyntheticUserGenerator instance
-        output_dir: Output directory
-        dpi: DPI for saved figures
-    """
-    logger.info("Creating user visualisations...")
+    validate_synthetic_population(
+        population,
+        expected_track_count=len(population["configuration"]["ordered_track_ids"]),
+        expected_master_seed=CANONICAL_MASTER_SEED,
+    )
+    path = Path(output_path)
+    sidecar = path.parent / f"{path.name}.sha256"
+    if path.exists() or path.is_symlink() or sidecar.exists() or sidecar.is_symlink():
+        raise FileExistsError("canonical synthetic population output already exists")
+    if not path.parent.is_dir():
+        raise FileNotFoundError("canonical synthetic population parent does not exist")
+    encoded = canonical_json_bytes(population) + b"\n"
+    path.write_bytes(encoded)
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    hexdigest = digest.hexdigest()
+    sidecar.write_text(f"{hexdigest}  {path.name}\n", encoding="ascii")
+    return hexdigest
 
-    generator.create_visualisations(output_dir, dpi)
 
-    logger.info("Visualisations created successfully")
+def load_population_file(
+    input_path: str | Path, *, expected_track_count: int | None = None
+) -> Dict[str, Any]:
+    """Hash-check and fully validate one canonical reusable population file."""
+
+    path = Path(input_path)
+    sidecar = path.parent / f"{path.name}.sha256"
+    if (
+        not path.is_file()
+        or path.is_symlink()
+        or not sidecar.is_file()
+        or sidecar.is_symlink()
+    ):
+        raise ValueError("canonical synthetic population file or sidecar is invalid")
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    expected_line = f"{digest.hexdigest()}  {path.name}\n"
+    if sidecar.read_text(encoding="ascii") != expected_line:
+        raise ValueError("canonical synthetic population SHA-256 mismatch")
+
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate key in population JSON: {key}")
+            result[key] = value
+        return result
+
+    try:
+        with path.open("r", encoding="utf-8") as source:
+            population = json.load(
+                source,
+                object_pairs_hook=reject_duplicates,
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    ValueError(f"non-finite population JSON value: {value}")
+                ),
+            )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("canonical synthetic population JSON is invalid") from exc
+    validate_synthetic_population(
+        population,
+        expected_track_count=expected_track_count,
+        expected_master_seed=CANONICAL_MASTER_SEED,
+    )
+    return population
 
 
-def generate_report(generator: SyntheticUserGenerator, output_dir: str) -> None:
-    """
-    Generate comprehensive markdown report.
+def load_exported_population(output_dir: str | Path) -> Dict[str, Any]:
+    """Load and revalidate one immutable canonical population export."""
 
-    Args:
-        generator: SyntheticUserGenerator instance
-        output_dir: Output directory
-    """
-    logger.info("Generating comprehensive report...")
+    output_path = Path(output_dir)
+    manifest_path = output_path / POPULATION_MANIFEST_FILENAME
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise ValueError("canonical synthetic population manifest is missing")
+    with manifest_path.open("r", encoding="utf-8") as source:
+        manifest = json.load(source)
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or manifest.get("record_type")
+        != "canonical_synthetic_population_manifest"
+        or set(manifest.get("files", {})) != CANONICAL_EXPORT_FILENAMES
+    ):
+        raise ValueError("canonical synthetic population manifest is invalid")
+    payloads = {}
+    for filename in sorted(CANONICAL_EXPORT_FILENAMES):
+        path = output_path / filename
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"canonical population file is invalid: {filename}")
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        entry = manifest["files"][filename]
+        if (
+            not isinstance(entry, dict)
+            or entry.get("bytes") != path.stat().st_size
+            or entry.get("sha256") != digest.hexdigest()
+        ):
+            raise ValueError(f"canonical population hash mismatch: {filename}")
+        with path.open("r", encoding="utf-8") as source:
+            payloads[filename] = json.load(source)
 
-    generator.generate_report(output_dir)
-
-    logger.info("Report generated successfully")
+    configuration = dict(
+        payloads["canonical_synthetic_user_configuration.json"]
+    )
+    configuration.pop("record_type", None)
+    population = {
+        "schema_version": configuration["schema_version"],
+        "configuration": configuration,
+        "users": payloads["canonical_synthetic_users.json"]["users"],
+        "interactions": payloads["canonical_user_interactions.json"][
+            "interactions"
+        ],
+        "splits": {
+            split_name: payloads[
+                f"canonical_{split_name}_interactions.json"
+            ]["interactions"]
+            for split_name in ("train", "validation", "test")
+        },
+        "diagnostics": payloads[
+            "canonical_synthetic_user_diagnostics.json"
+        ]["diagnostics"],
+    }
+    validate_synthetic_population(
+        population,
+        expected_track_count=len(configuration["ordered_track_ids"]),
+        expected_master_seed=CANONICAL_MASTER_SEED,
+    )
+    if (
+        manifest.get("master_seed") != configuration["master_seed"]
+        or manifest.get("population_size") != configuration["population_size"]
+        or manifest.get("track_metadata_sha256")
+        != configuration["track_metadata_sha256"]
+    ):
+        raise ValueError("canonical population manifest identity disagrees")
+    return population
 
 
 def print_summary(
-    users: Dict[str, Dict],
-    interactions: Dict[str, Dict],
-    train_users: Dict[str, Dict],
-    test_users: Dict[str, Dict],
+    population: Dict[str, Any],
     output_dir: str,
 ) -> None:
-    """
-    Print generation summary.
+    """Print a factual summary of the controlled simulation records."""
 
-    Args:
-        users: All user profiles
-        interactions: All user interactions
-        train_users: Training user profiles
-        test_users: Test user profiles
-        output_dir: Output directory
-    """
+    users = population["users"]
+    interactions = population["interactions"]
+    splits = population["splits"]
     total_interactions = sum(len(interactions[u]) for u in interactions)
-    train_interactions = sum(len(interactions[u]) for u in train_users)
-    test_interactions = sum(len(interactions[u]) for u in test_users)
-
-    # Calculate archetype distribution
-    archetype_counts = {}
-    for user in users.values():
-        archetype = user["archetype"]
-        archetype_counts[archetype] = archetype_counts.get(archetype, 0) + 1
+    split_counts = {
+        split_name: sum(len(items) for items in split_users.values())
+        for split_name, split_users in splits.items()
+    }
 
     print("\n" + "=" * 60)
-    print("SYNTHETIC USERS GENERATION COMPLETED")
+    print("CONTROLLED SYNTHETIC POPULATION GENERATED")
     print("=" * 60)
     print(f"Output directory: {output_dir}")
     print(f"Total users generated: {len(users)}")
-    print(f"Training users: {len(train_users)}")
-    print(f"Test users: {len(test_users)}")
+    print("All users retained across within-user interaction splits")
     print(f"Total interactions: {total_interactions}")
-    print(f"Training interactions: {train_interactions}")
-    print(f"Test interactions: {test_interactions}")
+    print(f"Training interactions: {split_counts['train']}")
+    print(f"Validation interactions: {split_counts['validation']}")
+    print(f"Test interactions: {split_counts['test']}")
     print(f"Average interactions per user: {total_interactions / len(users):.1f}")
 
     print("\nUser Archetype Distribution:")
-    for archetype, count in sorted(archetype_counts.items()):
+    for archetype, count in sorted(
+        population["diagnostics"]["realised_archetype_counts"].items()
+    ):
         percentage = (count / len(users)) * 100
         print(f"  {archetype}: {count} users ({percentage:.1f}%)")
 
-    print("\nGenerated Files:")
-    print("  Data Files:")
-    print("    - synthetic_users.json: Complete user profiles")
-    print("    - user_interactions.json: User-item interaction matrix")
-    print("    - user_statistics.json: Comprehensive user statistics")
-    print("    - user_statistics_table.csv: LaTeX-ready user statistics table")
-    print("    - interaction_matrix_summary.json: Matrix statistics")
-    print("    - train_users.json: Training user profiles")
-    print("    - test_users.json: Test user profiles")
-    print("    - train_interactions.json: Training interactions")
-    print("    - test_interactions.json: Test interactions")
-    print("    - split_statistics.json: Train/test split statistics")
-
-    print("  Visualizations:")
-    print("    - user_archetypes.png: User archetype distribution (300 DPI)")
-    print("    - interaction_heatmap.png: User-item interaction heatmap (300 DPI)")
-
-    print("  Reports:")
-    print("    - SYNTHETIC_USERS_REPORT.md: Comprehensive methodology report")
-
-    print("\nTotal: 11 dissertation-ready output files")
+    print("\nGenerated one canonical reusable population JSON record")
     print("=" * 60)
 
 
-def main():
+def main(argv=None):
     """Main function for synthetic user generation."""
-    args = parse_args()
+    args = parse_args(argv)
 
-    # Determine output directory for log file
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Set up logging with file handler
-    log_file = output_dir / "generate_synthetic_users.log"
-    configure_logging(args.log_level, log_file=str(log_file))
-    logger.info("Logging to file: %s", log_file)
+    _assert_export_directory_available(output_dir)
+    if output_dir.exists() or output_dir.is_symlink():
+        raise FileExistsError(f"synthetic-population output already exists: {output_dir}")
+    if not output_dir.parent.is_dir():
+        raise FileNotFoundError("synthetic-population output parent does not exist")
+    configure_logging(args.log_level)
     logger.info("Starting synthetic user generation...")
     logger.info("Tracks file: %s", args.tracks_json)
     logger.info("Output directory: %s", args.output_dir)
     logger.info("Number of users: %d", args.n_users)
-    logger.info("Test ratio: %.2f", args.test_ratio)
     logger.info("Random seed: %d", args.random_seed)
 
     try:
         # Load and validate tracks data
-        tracks_data = load_tracks_data(args.tracks_json)
+        tracks_data = load_tracks_data(args.tracks_json, expected_count=4000)
         validate_tracks_data(tracks_data)
 
-        # Create archetype distribution
-        archetype_distribution = create_archetype_distribution(args)
-
-        # Generate synthetic users
-        users, interactions, generator = generate_synthetic_users(
-            tracks_data=tracks_data,
-            n_users=args.n_users,
-            archetype_distribution=archetype_distribution,
-            random_seed=args.random_seed,
+        population = build_synthetic_population(
+            tracks_data,
+            master_seed=args.random_seed,
+            population_size=args.n_users,
         )
-
-        # Split into train/test
-        (
-            train_users,
-            validation_users,
-            test_users,
-            train_interactions,
-            validation_interactions,
-            test_interactions,
-        ) = split_train_test(
-            users=users,
-            interactions=interactions,
-            test_ratio=args.test_ratio,
-            validation_ratio=args.validation_ratio,
-            random_seed=args.random_seed,
+        output_dir.mkdir(mode=0o755)
+        export_population_file(
+            population,
+            output_dir / POPULATION_FILENAME,
         )
-
-        # Export user data
-        export_user_data(
-            generator=generator,
-            train_users=train_users,
-            validation_users=validation_users,
-            test_users=test_users,
-            train_interactions=train_interactions,
-            validation_interactions=validation_interactions,
-            test_interactions=test_interactions,
-            output_dir=args.output_dir,
-        )
-
-        # Create visualisations (if not disabled)
-        if not args.no_visualisations:
-            create_visualisations(
-                generator=generator, output_dir=args.output_dir, dpi=args.dpi
-            )
-
-        # Generate report (if not disabled)
-        if not args.no_report:
-            generate_report(generator=generator, output_dir=args.output_dir)
-
-        # Print summary
-        print_summary(
-            users=users,
-            interactions=interactions,
-            train_users=train_users,
-            test_users=test_users,
-            output_dir=args.output_dir,
-        )
+        print_summary(population=population, output_dir=args.output_dir)
 
         logger.info("Synthetic user generation completed successfully")
 

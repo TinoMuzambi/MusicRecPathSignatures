@@ -1,0 +1,44 @@
+[MESSAGES CONTROL]
+# Disable acceptable warnings in test files
+# W0212: Protected member access (acceptable in tests)
+# W0621: Redefining name from outer scope (acceptable in pytest fixtures)
+# W0201: Attribute defined outside __init__ (acceptable in test classes)
+# W0404: Reimport (acceptable in tests)
+# W0632: Unbalanced tuple unpacking (may be intentional)
+# E0401: Import errors for optional dependencies (esig may not be installed)
+# W0603: Global statement (intentional in logger config)
+
+disable=
+    # Test-specific acceptable patterns
+    W0212,  # Protected member access (acceptable in tests)
+    W0621,  # Redefining name from outer scope (acceptable in pytest fixtures)
+    W0201,  # Attribute defined outside __init__ (acceptable in test classes)
+    W0404,  # Reimport (acceptable in tests)
+    W0632,  # Unbalanced tuple unpacking (may be intentional)
+    E0401,  # Import errors for optional dependencies (esig may not be installed)
+    W0603,  # Global statement (intentional in logger config)
+
+[FORMAT]
+# Maximum number of characters on a single line
+max-line-length=120
+
+[DESIGN]
+# Maximum number of arguments for function / method
+max-args=10
+# Maximum number of attributes for a class
+max-attributes=15
+# Maximum number of boolean expressions in an if statement
+max-bool-expr=5
+# Maximum number of branch for function / method body
+max-branches=15
+# Maximum number of locals for function / method body
+max-locals=20
+# Maximum number of parents for a class
+max-parents=7
+# Maximum number of public methods for a class
+max-public-methods=25
+# Maximum number of return / yield for function / method body
+max-returns=8
+# Maximum number of statements in function / method body
+max-statements=60
+

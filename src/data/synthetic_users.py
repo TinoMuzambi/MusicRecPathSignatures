@@ -18,13 +18,16 @@ Features:
     - Export functionality for all user data and statistics
 
 Example:
-    >>> from src.data.synthetic_users import SyntheticUserGenerator
-    >>> generator = SyntheticUserGenerator()
-    >>> users, interactions = generator.generate_users(n_users=100, tracks_data=tracks)
-    >>> train_users, test_users = generator.split_train_test(users, test_ratio=0.2)
+    >>> from src.data.synthetic_users import build_synthetic_population
+    >>> population = build_synthetic_population(tracks)
+    >>> len(population["users"])
+    200
 """
 
 import json
+import hashlib
+import math
+import numbers
 import random
 from pathlib import Path
 from typing import Dict, List, Any, Tuple
@@ -35,9 +38,142 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from src.utils.logger_config import setup_logger
+from src.evaluation.experiment_protocol import (
+    ProtocolError,
+    normalise_id,
+    split_user_interactions,
+)
+from src.utils.provenance import canonical_json_bytes
 
 
 logger = setup_logger("synthetic_users")
+
+CANONICAL_MASTER_SEED = 2025
+CANONICAL_POPULATION_SIZE = 200
+CANONICAL_ARCHETYPE_DISTRIBUTION = {
+    "music_enthusiast": 0.20,
+    "genre_specialist": 0.25,
+    "casual_listener": 0.30,
+    "explorer": 0.15,
+    "mainstream_fan": 0.10,
+}
+POPULATION_FIELDS = {
+    "schema_version",
+    "configuration",
+    "users",
+    "interactions",
+    "splits",
+    "diagnostics",
+}
+CONFIGURATION_FIELDS = {
+    "schema_version",
+    "master_seed",
+    "population_size",
+    "archetype_distribution",
+    "ordered_track_ids",
+    "track_metadata",
+    "track_metadata_sha256",
+    "split_rule",
+    "preference_inputs",
+    "raw_audio_features_used",
+    "observed_human_behaviour",
+    "genre_specialist_preferred_genres",
+    "explorer_preferred_genre_count_rule",
+}
+USER_FIELDS = {
+    "user_id",
+    "archetype",
+    "archetype_key",
+    "engagement_level",
+    "diversity_preference",
+    "novelty_seeking",
+    "popularity_bias",
+    "preferred_genres",
+    "interaction_rate",
+    "age_group",
+    "listening_frequency",
+    "description",
+    "declared_interaction_count",
+    "realised_interaction_count",
+}
+INTERACTION_FIELDS = {
+    "rating",
+    "interaction_score",
+    "timestamp",
+    "genre",
+    "artist",
+}
+
+
+def _to_builtin(value: Any) -> Any:
+    """Convert NumPy containers/scalars into canonical JSON-compatible values."""
+
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        return [_to_builtin(item) for item in value.tolist()]
+    if isinstance(value, dict):
+        return {str(key): _to_builtin(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_builtin(item) for item in value]
+    return value
+
+
+def _normalise_track_metadata(
+    tracks_data: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Copy track records, normalise their IDs, and sort them lexically."""
+
+    if not isinstance(tracks_data, list) or not tracks_data:
+        raise ValueError("tracks_data must be a non-empty list")
+
+    normalised = []
+    seen_ids = set()
+    for index, track in enumerate(tracks_data):
+        if not isinstance(track, dict):
+            raise ValueError(f"track {index} must be a mapping")
+        raw_id = track.get("id")
+        raw_track_id = track.get("track_id")
+        if raw_id is not None and raw_track_id is not None:
+            track_id = normalise_id(raw_id, kind="track")
+            alias_id = normalise_id(raw_track_id, kind="track")
+            if track_id != alias_id:
+                raise ProtocolError(
+                    f"track {index} has conflicting track ID fields: "
+                    f"{track_id!r} and {alias_id!r}"
+                )
+        else:
+            track_id = normalise_id(
+                raw_id if raw_id is not None else raw_track_id,
+                kind="track",
+            )
+        if track_id in seen_ids:
+            raise ValueError(f"duplicate track ID after normalisation: {track_id}")
+        seen_ids.add(track_id)
+        copied = dict(track)
+        copied["id"] = track_id
+        copied.pop("track_id", None)
+        for field in ("title", "artist", "genre"):
+            value = copied.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"track {track_id} {field} must be a non-empty string")
+            if value.strip().casefold() == "unknown":
+                raise ValueError(f"track {track_id} {field} must not be Unknown")
+            copied[field] = value.strip()
+        duration = copied.get("duration")
+        if (
+            isinstance(duration, (bool, np.bool_))
+            or not isinstance(duration, numbers.Real)
+            or not math.isfinite(float(duration))
+            or float(duration) <= 0.0
+        ):
+            raise ValueError(f"track {track_id} duration must be finite and positive")
+        copied["duration"] = float(duration)
+        normalised.append(copied)
+
+    return sorted(normalised, key=lambda track: track["id"])
 
 
 class UserArchetype:
@@ -92,9 +228,13 @@ class SyntheticUserGenerator:
         Args:
             random_seed: Random seed for reproducibility
         """
+        if isinstance(random_seed, bool) or not isinstance(random_seed, int):
+            raise ValueError("random_seed must be a non-negative integer")
+        if random_seed < 0:
+            raise ValueError("random_seed must be a non-negative integer")
         self.random_seed = random_seed
-        np.random.seed(random_seed)
-        random.seed(random_seed)
+        self._np_rng = np.random.default_rng(random_seed)
+        self._python_rng = random.Random(random_seed)
 
         # Define user archetypes
         self.archetypes = self._define_archetypes()
@@ -123,7 +263,8 @@ class SyntheticUserGenerator:
                 diversity_preference=0.2,
                 novelty_seeking=0.4,
                 popularity_bias=0.5,
-                genre_focus=["Rock"],  # Will be randomly assigned
+                # Retained fixed-Rock limitation; see canonical configuration.
+                genre_focus=["Rock"],
                 interaction_rate=0.6,
                 description="Users focused on specific genres with moderate engagement",
             ),
@@ -178,18 +319,37 @@ class SyntheticUserGenerator:
         """
         logger.info("Generating %d synthetic users...", n_users)
 
-        if archetype_distribution is None:
-            archetype_distribution = {
-                "music_enthusiast": 0.2,
-                "genre_specialist": 0.25,
-                "casual_listener": 0.3,
-                "explorer": 0.15,
-                "mainstream_fan": 0.1,
-            }
+        if isinstance(n_users, bool) or not isinstance(n_users, int) or n_users < 1:
+            raise ValueError("n_users must be a positive integer")
+        tracks_data = _normalise_track_metadata(tracks_data)
 
-        # Validate distribution
-        if abs(sum(archetype_distribution.values()) - 1.0) > 1e-6:
-            raise ValueError("Archetype distribution must sum to 1.0")
+        if archetype_distribution is None:
+            archetype_distribution = dict(CANONICAL_ARCHETYPE_DISTRIBUTION)
+
+        if not isinstance(archetype_distribution, dict) or not archetype_distribution:
+            raise ValueError("archetype distribution must be a non-empty mapping")
+        keys = set(archetype_distribution)
+        unknown = sorted(keys.difference(self.archetypes))
+        if unknown:
+            raise ValueError(f"archetype distribution has unknown keys: {unknown}")
+        probabilities = []
+        for archetype, probability in archetype_distribution.items():
+            if (
+                isinstance(probability, (bool, np.bool_))
+                or not isinstance(probability, numbers.Real)
+                or not math.isfinite(float(probability))
+                or float(probability) < 0.0
+            ):
+                raise ValueError(
+                    f"archetype probability for {archetype} must be finite and non-negative"
+                )
+            probabilities.append(float(probability))
+        if not math.isclose(math.fsum(probabilities), 1.0, abs_tol=1e-12):
+            raise ValueError("archetype distribution must sum to 1.0")
+        archetype_distribution = {
+            key: float(archetype_distribution[key])
+            for key in archetype_distribution
+        }
 
         # Generate user profiles
         users = {}
@@ -255,7 +415,7 @@ class SyntheticUserGenerator:
         """Sample archetype based on distribution."""
         archetypes = list(distribution.keys())
         probabilities = list(distribution.values())
-        return np.random.choice(archetypes, p=probabilities)
+        return self._np_rng.choice(archetypes, p=probabilities)
 
     def _generate_user_profile(
         self,
@@ -268,34 +428,41 @@ class SyntheticUserGenerator:
 
         # Add some randomness to archetype parameters
         engagement = max(
-            0.1, min(1.0, archetype.engagement_level + np.random.normal(0, 0.1))
+            0.1,
+            min(1.0, archetype.engagement_level + self._np_rng.normal(0, 0.1)),
         )
         diversity = max(
-            0.0, min(1.0, archetype.diversity_preference + np.random.normal(0, 0.1))
+            0.0,
+            min(
+                1.0,
+                archetype.diversity_preference + self._np_rng.normal(0, 0.1),
+            ),
         )
         novelty = max(
-            0.0, min(1.0, archetype.novelty_seeking + np.random.normal(0, 0.1))
+            0.0,
+            min(1.0, archetype.novelty_seeking + self._np_rng.normal(0, 0.1)),
         )
         popularity_bias = max(
-            0.0, min(1.0, archetype.popularity_bias + np.random.normal(0, 0.1))
+            0.0,
+            min(1.0, archetype.popularity_bias + self._np_rng.normal(0, 0.1)),
         )
 
         # Assign genre preferences
         if archetype.genre_focus:
             preferred_genres = archetype.genre_focus.copy()
         else:
-            # Random genre selection for explorers
+            # Preserve the legacy exclusive upper bound, defining only G=1.
             all_genres = list(track_stats["genre_distribution"].keys())
-            n_preferred = np.random.randint(1, min(4, len(all_genres)))
-            preferred_genres = np.random.choice(
+            n_preferred = self._np_rng.integers(1, max(2, min(4, len(all_genres))))
+            preferred_genres = self._np_rng.choice(
                 all_genres, n_preferred, replace=False
             ).tolist()
 
         # Generate demographic-like attributes
-        age_group = np.random.choice(
+        age_group = self._np_rng.choice(
             ["18-25", "26-35", "36-45", "46-55", "55+"], p=[0.3, 0.25, 0.2, 0.15, 0.1]
         )
-        listening_frequency = np.random.choice(
+        listening_frequency = self._np_rng.choice(
             ["daily", "weekly", "monthly"], p=[0.4, 0.4, 0.2]
         )
 
@@ -336,11 +503,15 @@ class SyntheticUserGenerator:
         )
 
         # Add some randomness
-        n_interactions = max(1, int(base_interactions * np.random.uniform(0.5, 1.5)))
+        n_interactions = max(
+            1, int(base_interactions * self._np_rng.uniform(0.5, 1.5))
+        )
         n_interactions = min(n_interactions, n_possible_interactions)
 
-        # Select tracks to interact with
-        track_indices = list(range(len(tracks_data)))
+        # Select tracks to interact with.  The preferred draw is removed from
+        # the second pool before the remaining places are sampled, preventing
+        # duplicate IDs from being overwritten in the interaction dictionary.
+        track_indices = np.arange(len(tracks_data), dtype=np.int64)
 
         # Apply genre preference filtering
         if user_profile["preferred_genres"]:
@@ -351,47 +522,68 @@ class SyntheticUserGenerator:
             ]
             if preferred_indices:
                 # 70% from preferred genres, 30% random
-                n_preferred = int(n_interactions * 0.7)
-                n_random = n_interactions - n_preferred
-
-                preferred_selected = np.random.choice(
-                    preferred_indices,
-                    min(n_preferred, len(preferred_indices)),
-                    replace=False,
+                n_preferred = min(
+                    int(n_interactions * 0.7), len(preferred_indices)
                 )
-                random_selected = np.random.choice(
-                    track_indices, min(n_random, len(track_indices)), replace=False
+                preferred_selected = np.asarray(
+                    self._np_rng.choice(
+                        np.asarray(preferred_indices, dtype=np.int64),
+                        n_preferred,
+                        replace=False,
+                    ),
+                    dtype=np.int64,
+                ).reshape(-1)
+                remaining_mask = ~np.isin(track_indices, preferred_selected)
+                remaining_indices = track_indices[remaining_mask]
+                n_remaining = n_interactions - len(preferred_selected)
+                if n_remaining > len(remaining_indices):
+                    raise ValueError("interaction request exceeds remaining catalogue")
+                random_selected = np.asarray(
+                    self._np_rng.choice(
+                        remaining_indices, n_remaining, replace=False
+                    ),
+                    dtype=np.int64,
+                ).reshape(-1)
+                selected_indices = np.concatenate(
+                    [preferred_selected, random_selected]
                 )
-                selected_indices = np.concatenate([preferred_selected, random_selected])
             else:
-                selected_indices = np.random.choice(
+                selected_indices = self._np_rng.choice(
                     track_indices, n_interactions, replace=False
                 )
         else:
-            selected_indices = np.random.choice(
+            selected_indices = self._np_rng.choice(
                 track_indices, n_interactions, replace=False
             )
+
+        selected_indices = np.asarray(selected_indices, dtype=np.int64).reshape(-1)
+        if len(selected_indices) != n_interactions or len(set(selected_indices)) != n_interactions:
+            raise ValueError("interaction selection did not realise the declared count")
+        user_profile["declared_interaction_count"] = int(n_interactions)
 
         # Generate interaction scores
         for idx in selected_indices:
             track = tracks_data[idx]
 
-            # Get track ID (handle both 'id' and 'track_id' fields)
-            track_id = track.get("id") or track.get("track_id")
-            if not track_id:
-                continue  # Skip tracks without valid ID
+            # Normalise direct-call IDs; invalid records must not disappear.
+            raw_track_id = track.get("id")
+            if raw_track_id is None:
+                raw_track_id = track.get("track_id")
+            track_id = normalise_id(raw_track_id, kind="track")
 
             # Base score from popularity bias
             popularity_score = self._calculate_popularity_score(track, track_stats)
             base_score = user_profile["popularity_bias"] * popularity_score
 
             # Add diversity bonus
-            diversity_bonus = user_profile["diversity_preference"] * np.random.uniform(
+            diversity_bonus = user_profile["diversity_preference"] * self._np_rng.uniform(
                 0, 0.3
             )
 
             # Add novelty bonus
-            novelty_bonus = user_profile["novelty_seeking"] * np.random.uniform(0, 0.2)
+            novelty_bonus = user_profile["novelty_seeking"] * self._np_rng.uniform(
+                0, 0.2
+            )
 
             # Genre preference bonus
             genre_bonus = 0.0
@@ -409,11 +601,14 @@ class SyntheticUserGenerator:
             interactions[str(track_id)] = {
                 "rating": rating,
                 "interaction_score": interaction_score,
-                "timestamp": np.random.uniform(0, 1),  # Normalized timestamp
+                "timestamp": self._np_rng.uniform(0, 1),  # Normalized timestamp
                 "genre": track.get("genre", "Unknown"),
                 "artist": track.get("artist", "Unknown"),
             }
 
+        if len(interactions) != n_interactions:
+            raise ValueError("interaction records did not realise the declared count")
+        user_profile["realised_interaction_count"] = len(interactions)
         return interactions
 
     def _calculate_popularity_score(
@@ -509,89 +704,6 @@ class SyntheticUserGenerator:
     ) -> Dict[str, Any]:
         """Public wrapper to compute user statistics for external callers."""
         return self._calculate_user_statistics(users, interactions)
-
-    def split_train_test(
-        self,
-        users: Dict[str, Dict],
-        interactions: Dict[str, Dict],
-        test_ratio: float = 0.15,
-        validation_ratio: float = 0.15,
-        random_seed: int = 2025,
-    ) -> Tuple[
-        Dict[str, Dict],
-        Dict[str, Dict],
-        Dict[str, Dict],
-        Dict[str, Dict],
-        Dict[str, Dict],
-        Dict[str, Dict],
-    ]:
-        """
-        Split users into train, validation, and test sets for evaluation.
-
-        Args:
-            users: User profiles dictionary
-            interactions: User interactions dictionary
-            test_ratio: Ratio of users for testing (default: 0.15)
-            validation_ratio: Ratio of users for validation (default: 0.15)
-            random_seed: Random seed for reproducibility
-
-        Returns:
-            Tuple of (train_users, validation_users, test_users,
-                     train_interactions, validation_interactions, test_interactions)
-        """
-        train_ratio = 1.0 - test_ratio - validation_ratio
-        logger.info(
-            "Splitting users into train/validation/test sets (train: %.2f, validation: %.2f, test: %.2f)",
-            train_ratio,
-            validation_ratio,
-            test_ratio,
-        )
-
-        np.random.seed(random_seed)
-        user_ids = list(users.keys())
-        np.random.shuffle(user_ids)
-
-        # Calculate split sizes
-        n_test = int(len(user_ids) * test_ratio)
-        n_validation = int(len(user_ids) * validation_ratio)
-        n_train = len(user_ids) - n_test - n_validation
-
-        # Ensure at least 1 user in each set
-        n_test = max(1, min(n_test, len(user_ids) - 2))
-        n_validation = max(1, min(n_validation, len(user_ids) - n_test - 1))
-        n_train = len(user_ids) - n_test - n_validation
-
-        test_user_ids = user_ids[:n_test]
-        validation_user_ids = user_ids[n_test : n_test + n_validation]
-        train_user_ids = user_ids[n_test + n_validation :]
-
-        # Split users
-        train_users = {uid: users[uid] for uid in train_user_ids}
-        validation_users = {uid: users[uid] for uid in validation_user_ids}
-        test_users = {uid: users[uid] for uid in test_user_ids}
-
-        # Split interactions
-        train_interactions = {uid: interactions[uid] for uid in train_user_ids}
-        validation_interactions = {
-            uid: interactions[uid] for uid in validation_user_ids
-        }
-        test_interactions = {uid: interactions[uid] for uid in test_user_ids}
-
-        logger.info(
-            "Split: %d train users, %d validation users, %d test users",
-            len(train_users),
-            len(validation_users),
-            len(test_users),
-        )
-
-        return (
-            train_users,
-            validation_users,
-            test_users,
-            train_interactions,
-            validation_interactions,
-            test_interactions,
-        )
 
     def export_users(self, output_dir: str) -> None:
         """Export user data and statistics to files."""
@@ -757,9 +869,9 @@ class SyntheticUserGenerator:
         max_tracks = 100
 
         if len(user_ids) > max_users:
-            user_ids = np.random.choice(user_ids, max_users, replace=False)
+            user_ids = self._np_rng.choice(user_ids, max_users, replace=False)
         if len(track_ids) > max_tracks:
-            track_ids = np.random.choice(track_ids, max_tracks, replace=False)
+            track_ids = self._np_rng.choice(track_ids, max_tracks, replace=False)
 
         interaction_matrix = np.zeros((len(user_ids), len(track_ids)))
 
@@ -923,3 +1035,483 @@ This analysis generates 8 dissertation-ready output files suitable for inclusion
 """
 
         return content
+
+
+def _canonical_track_manifest(
+    tracks_data: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Retain only metadata fields used by the controlled simulation."""
+
+    return [
+        {
+            "id": track["id"],
+            "title": track.get("title", ""),
+            "artist": track.get("artist", "Unknown"),
+            "genre": track.get("genre", "Unknown"),
+            "duration": _to_builtin(track.get("duration", 0)),
+        }
+        for track in tracks_data
+    ]
+
+
+def _population_diagnostics(
+    *,
+    users: Dict[str, Dict[str, Any]],
+    interactions: Dict[str, Dict[str, Dict[str, Any]]],
+    splits: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]],
+    track_metadata: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build diagnostics that remain independently recomputable from records."""
+
+    track_genres = {
+        normalise_id(track["id"], kind="track"): track.get("genre", "Unknown")
+        for track in track_metadata
+    }
+    rating_histogram = {str(rating): 0 for rating in range(1, 6)}
+    realised_archetype_counts = {
+        archetype: 0 for archetype in CANONICAL_ARCHETYPE_DISTRIBUTION
+    }
+    per_archetype = {
+        archetype: {
+            "user_count": 0,
+            "interaction_count": 0,
+            "train_count": 0,
+            "validation_count": 0,
+            "test_count": 0,
+            "preferred_genre_test_count": 0,
+            "preferred_genre_test_share": 0.0,
+        }
+        for archetype in CANONICAL_ARCHETYPE_DISTRIBUTION
+    }
+
+    for user_id, user in users.items():
+        archetype = user["archetype_key"]
+        realised_archetype_counts[archetype] += 1
+        record = per_archetype[archetype]
+        record["user_count"] += 1
+        record["interaction_count"] += len(interactions[user_id])
+        for split_name in ("train", "validation", "test"):
+            record[f"{split_name}_count"] += len(splits[split_name][user_id])
+
+        for interaction in interactions[user_id].values():
+            rating_histogram[str(int(interaction["rating"]))] += 1
+        record["preferred_genre_test_count"] += sum(
+            track_genres[track_id] in user["preferred_genres"]
+            for track_id in splits["test"][user_id]
+        )
+
+    for record in per_archetype.values():
+        if record["test_count"]:
+            record["preferred_genre_test_share"] = (
+                record["preferred_genre_test_count"] / record["test_count"]
+            )
+
+    specialists = [
+        user
+        for user in users.values()
+        if user["archetype_key"] == "genre_specialist"
+    ]
+    return {
+        "rating_histogram": rating_histogram,
+        "realised_archetype_counts": realised_archetype_counts,
+        "per_archetype": per_archetype,
+        "all_genre_specialists_prefer_rock": bool(specialists)
+        and all(user["preferred_genres"] == ["Rock"] for user in specialists),
+    }
+
+
+def build_synthetic_population(
+    tracks_data: List[Dict[str, Any]],
+    *,
+    master_seed: int = CANONICAL_MASTER_SEED,
+    population_size: int = CANONICAL_POPULATION_SIZE,
+) -> Dict[str, Any]:
+    """Build the fixed controlled simulation and its within-user task splits."""
+
+    if population_size != CANONICAL_POPULATION_SIZE:
+        raise ValueError(
+            f"canonical population size must be {CANONICAL_POPULATION_SIZE}"
+        )
+
+    normalised_tracks = _normalise_track_metadata(tracks_data)
+    track_manifest = _canonical_track_manifest(normalised_tracks)
+    generator = SyntheticUserGenerator(random_seed=master_seed)
+    users, interactions = generator.generate_users(
+        tracks_data=normalised_tracks,
+        n_users=population_size,
+        archetype_distribution=dict(CANONICAL_ARCHETYPE_DISTRIBUTION),
+    )
+
+    splits: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = {
+        "train": {},
+        "validation": {},
+        "test": {},
+    }
+    for user_id in sorted(users):
+        split = split_user_interactions(
+            user_id,
+            interactions[user_id].keys(),
+            master_seed=master_seed,
+        )
+        for split_name, track_ids in (
+            ("train", split.train),
+            ("validation", split.validation),
+            ("test", split.test),
+        ):
+            splits[split_name][user_id] = {
+                track_id: interactions[user_id][track_id] for track_id in track_ids
+            }
+
+    configuration = {
+        "schema_version": 1,
+        "master_seed": master_seed,
+        "population_size": population_size,
+        "archetype_distribution": dict(CANONICAL_ARCHETYPE_DISTRIBUTION),
+        "ordered_track_ids": [track["id"] for track in track_manifest],
+        "track_metadata": track_manifest,
+        "track_metadata_sha256": hashlib.sha256(
+            canonical_json_bytes(track_manifest)
+        ).hexdigest(),
+        "split_rule": {
+            "train": "remainder after test and validation",
+            "validation_fraction": 0.15,
+            "test_fraction": 0.15,
+            "allocation": "first test, next validation, remainder train",
+            "owner": "src.evaluation.experiment_protocol.split_user_interactions",
+        },
+        "preference_inputs": [
+            "archetype rules",
+            "genre",
+            "novelty",
+            "popularity",
+        ],
+        "raw_audio_features_used": False,
+        "observed_human_behaviour": False,
+        "genre_specialist_preferred_genres": ["Rock"],
+        "explorer_preferred_genre_count_rule": {
+            "minimum": 1,
+            "exclusive_upper_bound": "max(2, min(4, catalogue_genre_count))",
+            "one_genre_result": 1,
+        },
+    }
+    diagnostics = _population_diagnostics(
+        users=users,
+        interactions=interactions,
+        splits=splits,
+        track_metadata=track_manifest,
+    )
+    population = _to_builtin(
+        {
+            "schema_version": 1,
+            "configuration": configuration,
+            "users": users,
+            "interactions": interactions,
+            "splits": splits,
+            "diagnostics": diagnostics,
+        }
+    )
+    validate_synthetic_population(
+        population,
+        expected_track_count=len(normalised_tracks),
+        expected_master_seed=master_seed,
+    )
+    return population
+
+
+def _finite_real(value: object, *, name: str) -> float:
+    if (
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, numbers.Real)
+        or not math.isfinite(float(value))
+    ):
+        raise ValueError(f"{name} must be a finite number")
+    return float(value)
+
+
+def validate_synthetic_population(
+    population: Dict[str, Any],
+    *,
+    expected_track_count: int | None = None,
+    expected_master_seed: int | None = None,
+) -> None:
+    """Validate the complete reusable population and within-user partitions."""
+
+    if (
+        not isinstance(population, dict)
+        or set(population) != POPULATION_FIELDS
+        or population.get("schema_version") != 1
+    ):
+        raise ValueError("synthetic population has an unsupported schema")
+    configuration = population["configuration"]
+    if (
+        not isinstance(configuration, dict)
+        or set(configuration) != CONFIGURATION_FIELDS
+        or configuration.get("schema_version") != 1
+    ):
+        raise ValueError("synthetic population configuration fields are not exact")
+    master_seed = configuration.get("master_seed")
+    population_size = configuration.get("population_size")
+    if (
+        isinstance(master_seed, bool)
+        or not isinstance(master_seed, int)
+        or master_seed < 0
+    ):
+        raise ValueError("synthetic population master_seed must be non-negative")
+    if expected_master_seed is not None and master_seed != expected_master_seed:
+        raise ValueError("synthetic population master_seed does not match expectation")
+    if population_size != CANONICAL_POPULATION_SIZE:
+        raise ValueError("synthetic population size is not canonical")
+    distribution = configuration.get("archetype_distribution")
+    if (
+        not isinstance(distribution, dict)
+        or distribution != CANONICAL_ARCHETYPE_DISTRIBUTION
+    ):
+        raise ValueError("canonical archetype distribution is not exact")
+    probabilities = [
+        _finite_real(value, name=f"archetype probability {key}")
+        for key, value in distribution.items()
+    ]
+    if any(value < 0 for value in probabilities) or not math.isclose(
+        math.fsum(probabilities), 1.0, abs_tol=1e-12
+    ):
+        raise ValueError("canonical archetype probabilities are invalid")
+
+    expected_split_rule = {
+        "train": "remainder after test and validation",
+        "validation_fraction": 0.15,
+        "test_fraction": 0.15,
+        "allocation": "first test, next validation, remainder train",
+        "owner": "src.evaluation.experiment_protocol.split_user_interactions",
+    }
+    if configuration.get("split_rule") != expected_split_rule:
+        raise ValueError("synthetic population split rule is not exact")
+    if configuration.get("preference_inputs") != [
+        "archetype rules",
+        "genre",
+        "novelty",
+        "popularity",
+    ]:
+        raise ValueError("synthetic population preference inputs are not exact")
+    if configuration.get("raw_audio_features_used") is not False:
+        raise ValueError("synthetic population raw-audio declaration is invalid")
+    if configuration.get("observed_human_behaviour") is not False:
+        raise ValueError("synthetic population observation declaration is invalid")
+    if configuration.get("genre_specialist_preferred_genres") != ["Rock"]:
+        raise ValueError("genre-specialist configuration is not exact")
+    if configuration.get("explorer_preferred_genre_count_rule") != {
+        "minimum": 1,
+        "exclusive_upper_bound": "max(2, min(4, catalogue_genre_count))",
+        "one_genre_result": 1,
+    }:
+        raise ValueError("explorer genre-count rule is not exact")
+
+    raw_metadata = configuration.get("track_metadata")
+    if (
+        not isinstance(raw_metadata, list)
+        or any(
+            not isinstance(record, dict)
+            or set(record) != {"id", "title", "artist", "genre", "duration"}
+            for record in raw_metadata
+        )
+    ):
+        raise ValueError("synthetic population track metadata fields are not exact")
+    metadata = _normalise_track_metadata(raw_metadata)
+    track_ids = tuple(track["id"] for track in metadata)
+    if [record["id"] for record in raw_metadata] != list(track_ids):
+        raise ValueError("synthetic population track metadata must be lexically sorted")
+    if configuration.get("ordered_track_ids") != list(track_ids):
+        raise ValueError("population metadata and ordered track IDs disagree")
+    if expected_track_count is not None and len(track_ids) != expected_track_count:
+        raise ValueError("synthetic population track count does not match expectation")
+    if configuration.get("track_metadata_sha256") != hashlib.sha256(
+        canonical_json_bytes(raw_metadata)
+    ).hexdigest():
+        raise ValueError("synthetic population track metadata hash is invalid")
+    catalogue = set(track_ids)
+    catalogue_genres = {record["genre"] for record in metadata}
+    metadata_by_id = {record["id"]: record for record in metadata}
+
+    users = population["users"]
+    interactions = population["interactions"]
+    splits = population["splits"]
+    if not isinstance(users, dict) or len(users) != population_size:
+        raise ValueError("synthetic population user count is invalid")
+    if not isinstance(interactions, dict):
+        raise ValueError("synthetic population interactions must be a mapping")
+    expected_user_ids = {f"user_{index}" for index in range(population_size)}
+    if set(users) != expected_user_ids or set(interactions) != expected_user_ids:
+        raise ValueError("synthetic population user IDs are not exact")
+    if not isinstance(splits, dict) or set(splits) != {"train", "validation", "test"}:
+        raise ValueError("synthetic population split names are not exact")
+    if any(not isinstance(split_users, dict) for split_users in splits.values()):
+        raise ValueError("synthetic population split records must be mappings")
+    if any(set(split_users) != expected_user_ids for split_users in splits.values()):
+        raise ValueError("synthetic population split user IDs are not exact")
+
+    canonical_archetypes = SyntheticUserGenerator(
+        random_seed=master_seed
+    ).archetypes
+    archetype_keys = set(CANONICAL_ARCHETYPE_DISTRIBUTION)
+    for user_id in sorted(expected_user_ids):
+        user = users[user_id]
+        if (
+            not isinstance(user, dict)
+            or set(user) != USER_FIELDS
+            or user.get("user_id") != user_id
+        ):
+            raise ValueError(f"synthetic user record is invalid: {user_id}")
+        if user.get("archetype_key") not in archetype_keys:
+            raise ValueError(f"synthetic user archetype is invalid: {user_id}")
+        archetype = canonical_archetypes[user["archetype_key"]]
+        for field in ("archetype", "age_group", "listening_frequency", "description"):
+            value = user.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{user_id} {field} must be a non-empty string")
+        if user["age_group"] not in {"18-25", "26-35", "36-45", "46-55", "55+"}:
+            raise ValueError(f"{user_id} age_group is invalid")
+        if user["listening_frequency"] not in {"daily", "weekly", "monthly"}:
+            raise ValueError(f"{user_id} listening_frequency is invalid")
+        for field in (
+            "engagement_level",
+            "diversity_preference",
+            "novelty_seeking",
+            "popularity_bias",
+            "interaction_rate",
+        ):
+            value = _finite_real(user.get(field), name=f"{user_id} {field}")
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{user_id} {field} must be between zero and one")
+        if (
+            user["archetype"] != archetype.name
+            or user["description"] != archetype.description
+            or user["interaction_rate"] != archetype.interaction_rate
+        ):
+            raise ValueError(
+                f"{user_id} does not match its canonical archetype profile"
+            )
+        preferred_genres = user.get("preferred_genres")
+        if (
+            not isinstance(preferred_genres, list)
+            or not preferred_genres
+            or len(set(preferred_genres)) != len(preferred_genres)
+            or any(
+                not isinstance(genre, str) or not genre.strip()
+                for genre in preferred_genres
+            )
+        ):
+            raise ValueError(f"{user_id} preferred_genres is invalid")
+        if not set(preferred_genres).issubset(catalogue_genres):
+            raise ValueError(
+                f"{user_id} preferred_genres are outside the catalogue genres"
+            )
+        if archetype.genre_focus:
+            if preferred_genres != archetype.genre_focus:
+                raise ValueError(
+                    f"{user_id} preferred_genres do not match its canonical archetype"
+                )
+        else:
+            exclusive_upper_bound = max(2, min(4, len(catalogue_genres)))
+            if (
+                not set(preferred_genres).issubset(catalogue_genres)
+                or len(preferred_genres) >= exclusive_upper_bound
+            ):
+                raise ValueError(
+                    f"{user_id} preferred_genres violate the explorer catalogue rule"
+                )
+        user_interactions = interactions[user_id]
+        if not isinstance(user_interactions, dict) or not user_interactions:
+            raise ValueError(f"{user_id} interactions must be non-empty")
+        declared = user.get("declared_interaction_count")
+        realised = user.get("realised_interaction_count")
+        if (
+            isinstance(declared, bool)
+            or not isinstance(declared, int)
+            or isinstance(realised, bool)
+            or not isinstance(realised, int)
+            or declared != realised
+            or realised != len(user_interactions)
+        ):
+            raise ValueError(
+                f"{user_id} declared and realised interaction counts disagree"
+            )
+        if not set(user_interactions).issubset(catalogue):
+            raise ValueError(f"{user_id} has an interaction outside the catalogue")
+        for track_id, interaction in user_interactions.items():
+            if not isinstance(interaction, dict) or set(interaction) != INTERACTION_FIELDS:
+                raise ValueError(
+                    f"{user_id}/{track_id} interaction fields are not exact"
+                )
+            rating = interaction.get("rating")
+            if isinstance(rating, bool) or not isinstance(rating, int) or not 1 <= rating <= 5:
+                raise ValueError(f"{user_id}/{track_id} rating is invalid")
+            for field in ("interaction_score", "timestamp"):
+                value = _finite_real(
+                    interaction.get(field), name=f"{user_id}/{track_id} {field}"
+                )
+                if not 0.0 <= value <= 1.0:
+                    raise ValueError(f"{user_id}/{track_id} {field} is invalid")
+            for field in ("genre", "artist"):
+                value = interaction.get(field)
+                if (
+                    not isinstance(value, str)
+                    or not value.strip()
+                    or value.strip().casefold() == "unknown"
+                ):
+                    raise ValueError(f"{user_id}/{track_id} {field} is invalid")
+            metadata_record = metadata_by_id[track_id]
+            if (
+                interaction["genre"] != metadata_record["genre"]
+                or interaction["artist"] != metadata_record["artist"]
+            ):
+                raise ValueError(
+                    f"{user_id}/{track_id} interaction metadata disagrees"
+                )
+
+        split_sets = []
+        for split_name in ("train", "validation", "test"):
+            split_records = splits[split_name][user_id]
+            if not isinstance(split_records, dict) or not split_records:
+                raise ValueError(f"{user_id} {split_name} split must be non-empty")
+            if any(
+                track_id not in user_interactions
+                or record != user_interactions[track_id]
+                for track_id, record in split_records.items()
+            ):
+                raise ValueError(f"{user_id} {split_name} split record disagrees")
+            split_sets.append(set(split_records))
+        if (
+            split_sets[0].intersection(split_sets[1])
+            or split_sets[0].intersection(split_sets[2])
+            or split_sets[1].intersection(split_sets[2])
+            or set().union(*split_sets) != set(user_interactions)
+        ):
+            raise ValueError(f"{user_id} interaction splits do not form a partition")
+        expected_split = split_user_interactions(
+            user_id,
+            user_interactions.keys(),
+            master_seed=master_seed,
+        )
+        expected_split_sets = (
+            set(expected_split.train),
+            set(expected_split.validation),
+            set(expected_split.test),
+        )
+        if tuple(split_sets) != expected_split_sets:
+            raise ValueError(f"{user_id} does not use the exact seeded split")
+
+    realised_archetypes = {
+        user["archetype_key"] for user in users.values()
+    }
+    if realised_archetypes != archetype_keys:
+        raise ValueError("every canonical archetype must be realised")
+
+    recomputed = _population_diagnostics(
+        users=users,
+        interactions=interactions,
+        splits=splits,
+        track_metadata=metadata,
+    )
+    if canonical_json_bytes(recomputed) != canonical_json_bytes(population["diagnostics"]):
+        raise ValueError("synthetic population diagnostics are inconsistent")
+    if population["diagnostics"].get("all_genre_specialists_prefer_rock") is not True:
+        raise ValueError("genre-specialist diagnostic must be true")

@@ -1,0 +1,3 @@
+# LightFM is an optional comparison backend. Its latest PyPI release does not
+# build on Python 3.12+, so use Python 3.11 for this extra.
+lightfm==1.17; python_version < "3.12"

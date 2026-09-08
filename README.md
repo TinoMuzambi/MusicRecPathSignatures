@@ -115,6 +115,7 @@ code/
 │   ├── dissertation_figures/  # Publication-quality figures
 │   └── dissertation_package/  # Final package for LaTeX
 ├── requirements.txt
+├── requirements-lightfm.txt  # Optional legacy comparison backend
 └── README.md
 ```
 
@@ -123,20 +124,27 @@ code/
 1. **Clone the repository**
 
    ```bash
-   git clone <repository-url>
-   cd code
+   git clone https://github.com/TinoMuzambi/MusicRecPathSignatures.git
+   cd MusicRecPathSignatures
    ```
 
 2. **Install dependencies**
+
    ```bash
-   pip install -r requirements.txt
+   python -m venv .venv
+   source .venv/bin/activate
+   python -m pip install -r requirements.txt
    ```
 
-If your environment does not support building optional libraries (e.g., LightFM/Implicit), the baselines automatically fall back to cosine-based implementations. Ensure `esig` installs correctly (it pulls binary deps). If `pip` is missing in your venv, bootstrap with:
+`LightFM` is an optional legacy comparison backend. Its latest PyPI release does
+not build on Python 3.12 or newer, so install it in a Python 3.11 environment only:
 
 ```bash
-python -m ensurepip --upgrade && pip install -r requirements.txt
+python -m pip install -r requirements-lightfm.txt
 ```
+
+The canonical `implicit` baseline and the full test suite work on Python 3.12.
+`esig` installs binary dependencies and may take longer than the other packages.
 
 ## Dataset Requirements
 
@@ -501,7 +509,7 @@ pytest tests/
 # Run specific test categories
 pytest tests/test_baseline_methods.py -v
 pytest tests/test_path_signatures.py -v
-pytest tests/test_evaluation_metrics.py -v
+pytest tests/test_evaluation.py -v
 pytest tests/test_ablation_studies.py -v
 ```
 
@@ -557,4 +565,6 @@ pytest tests/test_ablation_studies.py -v
 
 ## License
 
-This project is part of an MSc thesis in Computer Science. Please cite appropriately if using this work in your research.
+The software is available under the [MIT License](LICENSE). This project forms
+part of an MSc thesis in Computer Science; please cite the research appropriately
+if you use it in academic work.

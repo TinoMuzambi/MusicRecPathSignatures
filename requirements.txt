@@ -6,13 +6,12 @@ pandas==2.2.3
 # Visualisation
 matplotlib==3.9.4
 seaborn==0.13.2
-pillow==11.2.1
+pillow==12.3.0
 
 # Machine Learning
 scikit-learn==1.6.1
 
 # Recommendation Systems
-lightfm==1.17
 implicit==0.7.0
 
 # Audio Processing
@@ -32,7 +31,7 @@ jupyter_core==5.7.2
 matplotlib-inline==0.1.7
 
 # Testing
-pytest==8.3.5
+pytest==9.0.3
 
 # Utilities
 python-dateutil==2.9.0.post0
